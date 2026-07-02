@@ -75,6 +75,14 @@ const PRIMARY_AGENT: string = requirePrimaryAgent();
 const SUB_AGENT: string = _config.sub_agent ?? PRIMARY_AGENT;
 const MAX_MONEY_SPENT = _config.max_money_spent ?? Infinity;
 const MAX_COMPLETION_TOKENS = _config.max_completion_tokens ?? 50000;
+// PER-CALL ceiling on a single LLM call's total tokens (input + output), NOT a
+// run-wide cumulative sum. Since the whole conversation is re-sent every turn,
+// this is what actually bounds how large one agent's context can grow: once a
+// single call's prompt_tokens + completion_tokens exceeds this, the run stops.
+// We check the usage the call already returned (input + output for that call)
+// rather than pre-counting tokens — approximate, but close enough and it needs
+// no tokenizer. (completion budget below stays cumulative: output is generated
+// once and never re-sent, so summing it does not double-count.)
 const MAX_PROMPT_TOKENS = _config.max_prompt_tokens ?? 200000;
 // ACP runs have no working token/cost budget (usage is always zero), so they get
 // a default global call ceiling of 50 unless overridden. Other backends stay
@@ -834,8 +842,12 @@ Output:\n${stdoutBuffer.trim()}
         if (totalUsage.completion_tokens > MAX_COMPLETION_TOKENS) {
             throw new Error(`Completion token budget exceeded: ${totalUsage.completion_tokens.toLocaleString()} tokens used, limit is ${MAX_COMPLETION_TOKENS.toLocaleString()}`);
         }
-        if (totalUsage.prompt_tokens > MAX_PROMPT_TOKENS) {
-            throw new Error(`Prompt token budget exceeded: ${totalUsage.prompt_tokens.toLocaleString()} tokens used, limit is ${MAX_PROMPT_TOKENS.toLocaleString()}`);
+        // Per-call context guard: this single call's input + output tokens. Bounds
+        // how large one agent's context is allowed to grow, independent of how many
+        // turns the run has taken (see MAX_PROMPT_TOKENS above).
+        const callTokens = (usage.prompt_tokens || 0) + (usage.completion_tokens || 0);
+        if (callTokens > MAX_PROMPT_TOKENS) {
+            throw new Error(`Prompt token budget exceeded: ${callTokens.toLocaleString()} tokens in this call (input ${(usage.prompt_tokens || 0).toLocaleString()} + output ${(usage.completion_tokens || 0).toLocaleString()}), per-call limit is ${MAX_PROMPT_TOKENS.toLocaleString()}`);
         }
 
         llmSpinner.success("Code generated");

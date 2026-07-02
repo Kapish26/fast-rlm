@@ -352,8 +352,8 @@ All config fields:
 | `max_calls_per_subagent` | `int` | `20` | Max LLM calls per subagent |
 | `truncate_len` | `int` | `10000` | Output chars shown to the LLM per step. **Quality-critical** for document/navigation tasks — too low and the model sees only a truncated slice of gathered results and guesses the rest. Raise further for large-context extraction. |
 | `max_money_spent` | `float` | `0.2` | Hard budget cap in USD. On OpenRouter, real spend is read from `usage.cost_details` (the top-level `cost` is `0` for BYOK keys), so the cap fires correctly. Where no cost is reported, use `max_global_calls` to bound the run. |
-| `max_completion_tokens` | `int` | `50000` | Max total completion tokens across all subagents |
-| `max_prompt_tokens` | `int` | `200000` | Max total prompt tokens across all subagents |
+| `max_completion_tokens` | `int` | `50000` | Max total completion tokens across all subagents (cumulative) |
+| `max_prompt_tokens` | `int` | `200000` | **Per-call** ceiling on a single LLM call's input + output tokens (not a run-wide sum). Bounds how large any one agent's context may grow; the run stops when a single call exceeds it. |
 | `max_global_calls` | `int` | `∞` (50 for ACP) | Max total LLM calls across the whole run (root + all subagents) |
 
 ## Progress & verbosity

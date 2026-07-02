@@ -146,7 +146,13 @@ class RLMConfig:
     # 10000 after user reports; raise further for large-context extraction.
     truncate_len: int = 10000
     max_money_spent: float = 0.2
+    # Cumulative completion tokens across the whole run (output is generated once,
+    # never re-sent, so summing is correct).
     max_completion_tokens: int = 50000
+    # PER-CALL ceiling on one LLM call's input + output tokens (NOT a run-wide
+    # sum). Bounds how large a single agent's context may grow; the run stops once
+    # any one call exceeds it. Checked against the usage that call returned, so
+    # it's approximate but needs no tokenizer.
     max_prompt_tokens: int = 200000
     # Global cap on the TOTAL number of LLM calls across the whole run (root +
     # all sub-agents, every backend). None = unlimited. Once reached, no new
