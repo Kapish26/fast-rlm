@@ -139,6 +139,11 @@ class RLMConfig:
     sub_agent: Optional[str] = None
     max_depth: int = 3
     max_calls_per_subagent: int = 20
+    # Cap on the ROOT agent's REPL steps (depth 0) specifically. None = fall back
+    # to max_calls_per_subagent. Provider-independent: bounds a run even when
+    # cost/token usage is unavailable (e.g. ACP, or a backend that reports no
+    # cost). max_steps=1 makes the root a single-shot, non-agentic call.
+    max_steps: Optional[int] = None
     truncate_len: int = 2000
     max_money_spent: float = 0.2
     max_completion_tokens: int = 50000

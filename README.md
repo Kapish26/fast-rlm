@@ -350,8 +350,9 @@ All config fields:
 | `sub_agent` | `str` | `primary_agent` | Model for child subagents. Defaults to `primary_agent` when unset. |
 | `max_depth` | `int` | `3` | Max recursive subagent depth |
 | `max_calls_per_subagent` | `int` | `20` | Max LLM calls per subagent |
+| `max_steps` | `int` | `None` | Cap on the **root** agent's steps (depth 0). Falls back to `max_calls_per_subagent`. Provider-independent — bounds a run even when cost is unavailable. `max_steps=1` = single-shot, non-agentic call. |
 | `truncate_len` | `int` | `2000` | Output chars shown to the LLM per step |
-| `max_money_spent` | `float` | `1.0` | Hard budget cap in USD |
+| `max_money_spent` | `float` | `1.0` | Hard budget cap in USD. On OpenRouter, real spend is read from `usage.cost_details` (the top-level `cost` is `0` for BYOK keys), so the cap fires correctly. Where no cost is reported, use `max_steps` / `max_global_calls` to bound the run. |
 | `max_completion_tokens` | `int` | `50000` | Max total completion tokens across all subagents |
 | `max_prompt_tokens` | `int` | `200000` | Max total prompt tokens across all subagents |
 | `max_global_calls` | `int` | `∞` (50 for ACP) | Max total LLM calls across the whole run (root + all subagents) |

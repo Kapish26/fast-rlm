@@ -4,6 +4,7 @@ import { buildSystemPrompt, PromptOptions } from "./prompt.ts";
 import { createVertexClient, refreshVertexClient, isVertexModel, stripVertexPrefix } from "./vertex.ts";
 import { confirmAcpDelegation, generateAcpCode, isAcpModel } from "./acp.ts";
 import { anthropicApiKey, confirmAnthropicDelegation, generateAnthropicCode, isAnthropicModel } from "./anthropic.ts";
+import { toUsage } from "./usage.ts";
 
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_TIMEOUT_MS = 600000;
@@ -126,14 +127,7 @@ export async function generate_code(
         const replMatches = [...content.matchAll(/```repl([\s\S]*?)```/g)];
         let code = replMatches.map(m => m[1].trim()).join("\n");
 
-        const usage: Usage = {
-            prompt_tokens: completion.usage?.prompt_tokens ?? 0,
-            completion_tokens: completion.usage?.completion_tokens ?? 0,
-            total_tokens: completion.usage?.total_tokens ?? 0,
-            cached_tokens: completion.usage?.prompt_tokens_details?.cached_tokens ?? 0,
-            reasoning_tokens: completion.usage?.completion_tokens_details?.reasoning_tokens ?? 0,
-            cost: (completion.usage as any)?.cost ?? undefined,
-        };
+        const usage = toUsage(completion.usage);
 
         if (!code) {
             return {
@@ -230,14 +224,7 @@ export async function confirmDelegation(
     const completion = await client.chat.completions.create(createParams);
     const content = (completion.choices[0].message.content || "").trim();
 
-    const usage: Usage = {
-        prompt_tokens: completion.usage?.prompt_tokens ?? 0,
-        completion_tokens: completion.usage?.completion_tokens ?? 0,
-        total_tokens: completion.usage?.total_tokens ?? 0,
-        cached_tokens: completion.usage?.prompt_tokens_details?.cached_tokens ?? 0,
-        reasoning_tokens: completion.usage?.completion_tokens_details?.reasoning_tokens ?? 0,
-        cost: (completion.usage as any)?.cost ?? undefined,
-    };
+    const usage = toUsage(completion.usage);
 
     // Fail-open: only an explicit "NO" (as the first word) rejects.
     const firstWord = content.replace(/^[^a-zA-Z]+/, "").slice(0, 4).toUpperCase();

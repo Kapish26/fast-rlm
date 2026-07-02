@@ -58,6 +58,8 @@ function formatValidationErrors(validate: ValidateFunction): string {
 
 const _config = loadConfig();
 const MAX_CALLS = _config.max_calls_per_subagent ?? 20;
+// Root-only step cap (depth 0). null = fall back to MAX_CALLS. See config.ts.
+const MAX_STEPS: number | null = _config.max_steps ?? null;
 const MAX_DEPTH = _config.max_depth ?? 3;
 const TRUNCATE_LEN = _config.truncate_len ?? 5000;
 // primary_agent is required (no default). sub_agent falls back to primary_agent.
@@ -160,7 +162,11 @@ export async function subagent(
         ? JSON.stringify(context)
         : context;
     const validate = compileSchema(effectiveSchema);
-    const logger = new Logger(subagent_depth, MAX_CALLS, parent_run_id);
+    // The root agent (depth 0) honors max_steps when set; every other agent uses
+    // the per-subagent call cap. This bounds the root even when cost/token
+    // budgets can't (e.g. cost unavailable), and max_steps=1 makes it single-shot.
+    const stepCap = (subagent_depth === 0 && MAX_STEPS != null) ? MAX_STEPS : MAX_CALLS;
+    const logger = new Logger(subagent_depth, stepCap, parent_run_id);
     logger.logAgentStart();
 
     const model_name = subagent_depth == 0 ? PRIMARY_AGENT : SUB_AGENT;
@@ -805,7 +811,7 @@ Output:\n${stdoutBuffer.trim()}
         confirmSpinner.success("Delegation approved");
     }
 
-    for (let i = 0; i < MAX_CALLS; i++) {
+    for (let i = 0; i < stepCap; i++) {
         // Global call budget: stop before making a new call once the run-wide
         // total is reached. Counts calls (not tokens), so it's the one stop gap
         // that works universally — including ACP, where usage is always zero.
@@ -847,14 +853,14 @@ Output:\n${stdoutBuffer.trim()}
             });
             printStep({
                 run_id: logger.run_id, parent_run_id, depth: subagent_depth,
-                step: i + 1, maxSteps: MAX_CALLS, code, reasoning: message.reasoning,
+                step: i + 1, maxSteps: stepCap, code, reasoning: message.reasoning,
                 usage, totalUsage: getTotalUsage(),
                 timestamps: { llm_call_start: llmCallStart, llm_call_end: llmCallEnd },
             });
 
             messages.push({
                 "role": "user",
-                "content": `${budgetBanner(i, MAX_CALLS)}Error: We could not extract code because you may not have used repl block!`
+                "content": `${budgetBanner(i, stepCap)}Error: We could not extract code because you may not have used repl block!`
 
             });
             continue
@@ -914,13 +920,13 @@ Output:\n${stdoutBuffer.trim()}
                 });
                 printStep({
                     run_id: logger.run_id, parent_run_id, depth: subagent_depth,
-                    step: i + 1, maxSteps: MAX_CALLS, code, output: truncatedErr,
+                    step: i + 1, maxSteps: stepCap, code, output: truncatedErr,
                     hasError: true, reasoning: message.reasoning,
                     usage, totalUsage: getTotalUsage(), timestamps: stepTimestamps,
                 });
                 messages.push({
                     "role": "user",
-                    "content": `${budgetBanner(i, MAX_CALLS)}Output: \n${truncatedErr}`,
+                    "content": `${budgetBanner(i, stepCap)}Output: \n${truncatedErr}`,
                 });
                 continue;
             }
@@ -928,7 +934,7 @@ Output:\n${stdoutBuffer.trim()}
             logger.logStep({ step: i + 1, code, reasoning: message.reasoning, usage, timestamps: stepTimestamps });
             printStep({
                 run_id: logger.run_id, parent_run_id, depth: subagent_depth,
-                step: i + 1, maxSteps: MAX_CALLS, code, output: truncatedText,
+                step: i + 1, maxSteps: stepCap, code, output: truncatedText,
                 reasoning: message.reasoning,
                 usage, totalUsage: getTotalUsage(), timestamps: stepTimestamps,
             });
@@ -949,14 +955,14 @@ Output:\n${stdoutBuffer.trim()}
         });
         printStep({
             run_id: logger.run_id, parent_run_id, depth: subagent_depth,
-            step: i + 1, maxSteps: MAX_CALLS, code, output: truncatedText,
+            step: i + 1, maxSteps: stepCap, code, output: truncatedText,
             hasError, reasoning: message.reasoning,
             usage, totalUsage: getTotalUsage(), timestamps: stepTimestamps,
         });
 
         messages.push({
             "role": "user",
-            "content": `${budgetBanner(i, MAX_CALLS)}Output: \n${truncatedText}`
+            "content": `${budgetBanner(i, stepCap)}Output: \n${truncatedText}`
         });
     }
 

@@ -33,6 +33,9 @@ def main():
                    help="Max recursive sub-agent depth (default: RLMConfig's 3).")
     p.add_argument("--max-calls", type=int, default=None,
                    help="Max REPL calls per sub-agent (default: RLMConfig's 20).")
+    p.add_argument("--max-steps", type=int, default=None,
+                   help="Cap on the ROOT agent's steps (default: max-calls). "
+                        "--max-steps 1 gives a single-shot, non-agentic call.")
     p.add_argument("--max-global-calls", type=int, default=None,
                    help="Global cap on total LLM calls across the whole run "
                         "(root + all sub-agents). Recommended for ACP agents.")
@@ -67,6 +70,8 @@ def main():
         config["max_depth"] = args.max_depth
     if args.max_calls is not None:
         config["max_calls_per_subagent"] = args.max_calls
+    if args.max_steps is not None:
+        config["max_steps"] = args.max_steps
     if args.max_global_calls is not None:
         config["max_global_calls"] = args.max_global_calls
     if args.acp_agents:
