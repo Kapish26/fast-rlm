@@ -29,11 +29,6 @@ export interface AcpAgentSpec {
 
 export interface RlmConfig {
     max_calls_per_subagent?: number;
-    // Cap on the ROOT agent's REPL steps specifically (depth 0). Provider-
-    // independent — bounds a run even when cost/token usage is unavailable.
-    // When unset, the root uses max_calls_per_subagent like any other agent.
-    // max_steps=1 gives a single-shot (non-agentic) root call.
-    max_steps?: number;
     max_depth?: number;
     truncate_len?: number;
     primary_agent?: string;

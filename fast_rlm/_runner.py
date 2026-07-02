@@ -139,11 +139,6 @@ class RLMConfig:
     sub_agent: Optional[str] = None
     max_depth: int = 3
     max_calls_per_subagent: int = 20
-    # Cap on the ROOT agent's REPL steps (depth 0) specifically. None = fall back
-    # to max_calls_per_subagent. Provider-independent: bounds a run even when
-    # cost/token usage is unavailable (e.g. ACP, or a backend that reports no
-    # cost). max_steps=1 makes the root a single-shot, non-agentic call.
-    max_steps: Optional[int] = None
     # Chars of REPL stdout shown to the model per step. Quality-critical for
     # document/navigation tasks: too low and the model only sees a truncated
     # slice of gathered results (offsets, IDs, candidates) and is forced to guess
@@ -304,6 +299,7 @@ def run(
     # Appended at the end so existing positional callers are unaffected.
     verbosity: Optional["int | str"] = None,
     on_step: Optional[Callable[[dict], None]] = None,
+    log_dir: Optional[str] = None,
 ) -> dict:
     """Run a fast-rlm query.
 
@@ -376,9 +372,13 @@ def run(
             noted in the instruction so it knows the format). When the loaded
             value is a dict with no ``instruction`` key, `instruction` is injected
             into it.
+        log_dir: Optional directory for the run's ``.jsonl`` transcript. Defaults
+            to ``<cwd>/logs``. The returned dict's ``log_file`` gives the exact
+            path written, so callers can locate/tail the live transcript.
 
     Returns:
-        Dict with 'results', 'usage', and optionally 'log_file'.
+        Dict with 'results', 'usage', and 'log_file' (path to the run's
+        ``.jsonl`` transcript, under `log_dir`).
     """
     _check_deno()
     engine_dir = _find_engine_dir()
@@ -429,7 +429,7 @@ def run(
         merged_config["sub_agent"] = merged_config["primary_agent"]
 
     output_file = tempfile.mktemp(suffix=".json")
-    log_dir = os.path.join(os.getcwd(), "logs")
+    log_dir = log_dir if log_dir is not None else os.path.join(os.getcwd(), "logs")
 
     cmd = _deno_prefix_cmd() + [
         "run",

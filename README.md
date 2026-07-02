@@ -350,9 +350,8 @@ All config fields:
 | `sub_agent` | `str` | `primary_agent` | Model for child subagents. Defaults to `primary_agent` when unset. |
 | `max_depth` | `int` | `3` | Max recursive subagent depth |
 | `max_calls_per_subagent` | `int` | `20` | Max LLM calls per subagent |
-| `max_steps` | `int` | `None` | Cap on the **root** agent's steps (depth 0). Falls back to `max_calls_per_subagent`. Provider-independent — bounds a run even when cost is unavailable. `max_steps=1` = single-shot, non-agentic call. |
 | `truncate_len` | `int` | `10000` | Output chars shown to the LLM per step. **Quality-critical** for document/navigation tasks — too low and the model sees only a truncated slice of gathered results and guesses the rest. Raise further for large-context extraction. |
-| `max_money_spent` | `float` | `0.2` | Hard budget cap in USD. On OpenRouter, real spend is read from `usage.cost_details` (the top-level `cost` is `0` for BYOK keys), so the cap fires correctly. Where no cost is reported, use `max_steps` / `max_global_calls` to bound the run. |
+| `max_money_spent` | `float` | `0.2` | Hard budget cap in USD. On OpenRouter, real spend is read from `usage.cost_details` (the top-level `cost` is `0` for BYOK keys), so the cap fires correctly. Where no cost is reported, use `max_global_calls` to bound the run. |
 | `max_completion_tokens` | `int` | `50000` | Max total completion tokens across all subagents |
 | `max_prompt_tokens` | `int` | `200000` | Max total prompt tokens across all subagents |
 | `max_global_calls` | `int` | `∞` (50 for ACP) | Max total LLM calls across the whole run (root + all subagents) |
@@ -431,7 +430,9 @@ Auth uses Application Default Credentials. Either run `gcloud auth application-d
 
 ![TUI Log Viewer](docs/images/tui.jpeg)
 
-Every run saves a `.jsonl` log file to `logs/`.
+Every run saves a `.jsonl` log file to `logs/` (override the directory with
+`run(..., log_dir=...)` or `fast-rlm --log-dir ...`). The exact path is returned
+as `log_file` in the result dict, so you can locate or tail the live transcript.
 
 ```bash
 # Print stats (no extra dependencies)

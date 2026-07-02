@@ -33,9 +33,6 @@ def main():
                    help="Max recursive sub-agent depth (default: RLMConfig's 3).")
     p.add_argument("--max-calls", type=int, default=None,
                    help="Max REPL calls per sub-agent (default: RLMConfig's 20).")
-    p.add_argument("--max-steps", type=int, default=None,
-                   help="Cap on the ROOT agent's steps (default: max-calls). "
-                        "--max-steps 1 gives a single-shot, non-agentic call.")
     p.add_argument("--max-global-calls", type=int, default=None,
                    help="Global cap on total LLM calls across the whole run "
                         "(root + all sub-agents). Recommended for ACP agents.")
@@ -43,6 +40,8 @@ def main():
                    help="JSON registry of custom ACP agents (or @file.json). "
                         "Only needed for non-preset agents.")
     p.add_argument("--prefix", default=None, help="Log filename prefix.")
+    p.add_argument("--log-dir", default=None,
+                   help="Directory for the run's .jsonl transcript (default: ./logs).")
     p.add_argument("--vertex", action="store_true",
                    help="Route models through Vertex AI (ADC auth).")
     p.add_argument("-q", "--quiet", action="store_true",
@@ -70,8 +69,6 @@ def main():
         config["max_depth"] = args.max_depth
     if args.max_calls is not None:
         config["max_calls_per_subagent"] = args.max_calls
-    if args.max_steps is not None:
-        config["max_steps"] = args.max_steps
     if args.max_global_calls is not None:
         config["max_global_calls"] = args.max_global_calls
     if args.acp_agents:
@@ -93,6 +90,7 @@ def main():
         instruction=args.prompt,
         config=config or None,
         prefix=args.prefix,
+        log_dir=args.log_dir,
         vertex=args.vertex,
         verbose=not args.quiet,
         verbosity=args.verbosity,
