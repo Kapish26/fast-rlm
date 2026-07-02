@@ -5,11 +5,92 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import threading
+import time
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 import yaml
+
+
+# Verbosity levels, shared with the Deno engine (--verbosity N):
+#   0 silent  — no terminal output at all
+#   1 summary — final result + global usage banners only
+#   2 full    — per-step boxes, spinners, chatter (default)
+_VERBOSITY_LEVELS = {"silent": 0, "quiet": 0, "summary": 1, "full": 2, "verbose": 2}
+
+
+def _normalize_verbosity(verbosity: Optional["int | str"], verbose: bool) -> int:
+    """Resolve the effective verbosity level (0-2).
+
+    `verbosity` wins when set (int 0-2 or a name in _VERBOSITY_LEVELS); otherwise
+    fall back to the legacy `verbose` bool (True -> full, False -> silent).
+    """
+    if verbosity is None:
+        return 2 if verbose else 0
+    if isinstance(verbosity, bool):  # bool is an int subclass — guard first
+        return 2 if verbosity else 0
+    if isinstance(verbosity, int):
+        if verbosity < 0 or verbosity > 2:
+            raise ValueError("verbosity int must be 0 (silent), 1 (summary), or 2 (full).")
+        return verbosity
+    if isinstance(verbosity, str):
+        key = verbosity.strip().lower()
+        if key not in _VERBOSITY_LEVELS:
+            raise ValueError(
+                f"verbosity string must be one of {sorted(set(_VERBOSITY_LEVELS))}, got {verbosity!r}."
+            )
+        return _VERBOSITY_LEVELS[key]
+    raise TypeError("verbosity must be None, an int (0-2), or a str.")
+
+
+def _tail_events(path: str, on_step: Callable[[dict], None], stop: threading.Event) -> None:
+    """Tail an NDJSON events file, invoking on_step for each complete line.
+
+    Runs in a daemon thread while the engine subprocess executes. The engine
+    writes each event synchronously (append + flush), so complete newline-
+    terminated lines are safe to parse as they appear. Returns only after the
+    file is fully drained *and* `stop` is set (i.e. the subprocess has exited),
+    so no trailing events are lost. A raising callback is caught and warned
+    about rather than allowed to kill the run.
+    """
+    buf = ""
+    f = None
+    try:
+        while True:
+            if f is None:
+                if os.path.exists(path):
+                    f = open(path, "r", encoding="utf-8", errors="replace")
+                elif stop.is_set():
+                    return  # subprocess ended without ever creating the file
+                else:
+                    time.sleep(0.05)
+                    continue
+            chunk = f.read()
+            if chunk:
+                buf += chunk
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    try:
+                        on_step(event)
+                    except Exception as e:  # never let a user callback break the run
+                        warnings.warn(f"on_step callback raised {type(e).__name__}: {e}")
+            elif stop.is_set():
+                return  # drained everything and the subprocess is done
+            else:
+                time.sleep(0.05)
+    finally:
+        if f is not None:
+            f.close()
 
 
 _PRIMITIVE_JSON_SCHEMAS = {
@@ -210,6 +291,9 @@ def run(
     vertex: bool = False,
     instruction: Optional[str] = None,
     input_file: Optional[str] = None,
+    # Appended at the end so existing positional callers are unaffected.
+    verbosity: Optional["int | str"] = None,
+    on_step: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """Run a fast-rlm query.
 
@@ -223,7 +307,23 @@ def run(
             `primary_agent` is REQUIRED and has no default — run() raises a
             ValueError if it is unset. `sub_agent` is optional and falls back to
             `primary_agent` when omitted.
-        verbose: If True, stream deno stdout/stderr to terminal.
+        verbose: Legacy toggle for terminal output. Superseded by `verbosity`;
+            kept for back-compat. Ignored when `verbosity` is set. True maps to
+            verbosity "full", False to "silent".
+        verbosity: How much the engine prints to the terminal. One of
+            0/"silent" (nothing), 1/"summary" (final result + global usage only),
+            or 2/"full" (per-step boxes, spinners, chatter — the default). When
+            None, falls back to `verbose`. Does not affect `on_step`, which
+            streams regardless of verbosity.
+        on_step: Optional callback invoked once per step as the run progresses
+            (root and every sub-agent), giving live programmatic visibility
+            without tailing the log file. Each call receives a dict with
+            `event_type` ("code_generated"/"execution_result"/"final_result"),
+            `run_id`, `parent_run_id`, `depth`, and — for step events — `step`,
+            `code`, `output`, `hasError`, `reasoning`, `usage`, `totalUsage`,
+            and `timestamps`. Runs in a background thread; exceptions it raises
+            are caught and warned about rather than aborting the run. This is the
+            same data written to the JSONL log, delivered live.
         env_variables: Optional dict of string KV pairs injected as
             `os.environ` entries inside every Pyodide REPL spawned by this
             run (root and all sub-agents). They are NOT set on the Deno host
@@ -272,6 +372,10 @@ def run(
     """
     _check_deno()
     engine_dir = _find_engine_dir()
+
+    verbosity_level = _normalize_verbosity(verbosity, verbose)
+    if on_step is not None and not callable(on_step):
+        raise TypeError("on_step must be a callable taking a single dict argument.")
 
     # Resolve input_file into the query (so the CLI can be a thin shim). This is
     # the file-type contract above; raw-text inputs also get an extension note
@@ -342,11 +446,19 @@ def run(
         log_dir,
         "--output",
         output_file,
+        "--verbosity",
+        str(verbosity_level),
         "--input-json",
     ]
 
     if prefix:
         cmd += ["--prefix", prefix]
+
+    # NDJSON step stream for the on_step callback; tailed live below.
+    events_tmpfile = None
+    if on_step is not None:
+        events_tmpfile = tempfile.mktemp(suffix=".events.jsonl")
+        cmd += ["--events-file", events_tmpfile]
 
     if not isinstance(query, (str, dict, list)):
         raise TypeError(
@@ -418,7 +530,21 @@ def run(
     if vertex:
         run_env = {**os.environ, "RLM_VERTEX_AI": "1"}
 
+    # At silent verbosity we capture (and drop) the engine's stdio; otherwise we
+    # inherit the terminal and let the engine self-limit via --verbosity.
+    capture_output = verbosity_level < 1
+
+    stop_event = threading.Event()
+    tail_thread = None
     try:
+        if on_step is not None:
+            tail_thread = threading.Thread(
+                target=_tail_events,
+                args=(events_tmpfile, on_step, stop_event),
+                daemon=True,
+            )
+            tail_thread.start()
+
         result = subprocess.run(
             cmd,
             input=stdin_payload,
@@ -427,12 +553,12 @@ def run(
             errors="replace",
             cwd=str(engine_dir),
             env=run_env,
-            stdout=None if verbose else subprocess.PIPE,
-            stderr=None if verbose else subprocess.PIPE,
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output else None,
         )
 
         if not os.path.exists(output_file):
-            stderr = result.stderr or "" if not verbose else ""
+            stderr = (result.stderr or "") if capture_output else ""
             raise RuntimeError(
                 f"fast-rlm engine failed (exit code {result.returncode}).\n{stderr}"
             )
@@ -440,6 +566,13 @@ def run(
         with open(output_file) as f:
             data = json.load(f)
     finally:
+        # Signal the tail thread to drain remaining events and stop, then join
+        # before the events file is removed below.
+        if tail_thread is not None:
+            stop_event.set()
+            tail_thread.join(timeout=5)
+        if events_tmpfile and os.path.exists(events_tmpfile):
+            os.unlink(events_tmpfile)
         if os.path.exists(output_file):
             os.unlink(output_file)
         if config_tmpfile and os.path.exists(config_tmpfile):

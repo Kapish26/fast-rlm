@@ -4,8 +4,9 @@
 
 import pino from "npm:pino";
 import type { Usage } from "./call_llm.ts";
-import { printStep, showFinalResult, type StepData } from "./ui.ts";
+import { getVerbosity, showFinalResult, type StepData } from "./ui.ts";
 import { getTotalUsage } from "./usage.ts";
+import { emitEvent } from "./events.ts";
 import chalk from "npm:chalk@5";
 
 // Re-export types
@@ -51,7 +52,9 @@ function initPino() {
             base: null, // Skip hostname/pid to avoid --allow-sys requirement
         }, pino.destination({ dest: currentLogFile, sync: false }));
 
-        console.log(chalk.dim(`📝 Logging to: ${currentLogFile}\n`));
+        if (getVerbosity() >= 2) {
+            console.log(chalk.dim(`📝 Logging to: ${currentLogFile}\n`));
+        }
     }
     return pinoLogger;
 }
@@ -115,28 +118,34 @@ export class Logger {
             step,
         });
 
-        if (output !== undefined) {
-            log.info({
-                event_type: "execution_result",
-                code,
-                output,
-                hasError,
-                reasoning,
-                usage,
-                timestamps,
-            });
-        } else {
-            log.info({
-                event_type: "code_generated",
-                code,
-                reasoning,
-                usage,
-                timestamps,
-            });
-        }
+        const event_type = output !== undefined ? "execution_result" : "code_generated";
+        log.info({
+            event_type,
+            code,
+            output,
+            hasError,
+            reasoning,
+            usage,
+            timestamps,
+        });
 
-        // Display on terminal
-        printStep(fullData);
+        // Stream the same step data to the Python `on_step` callback (no-op when
+        // no --events-file was configured). The terminal render is done by the
+        // caller's explicit printStep(), so logStep no longer prints here.
+        emitEvent({
+            event_type,
+            run_id: this.run_id,
+            parent_run_id: this.parent_run_id,
+            depth: this.depth,
+            step,
+            code,
+            output,
+            hasError,
+            reasoning,
+            usage,
+            totalUsage: fullData.totalUsage,
+            timestamps,
+        });
     }
 
     logFinalResult(result: unknown): void {
@@ -147,6 +156,14 @@ export class Logger {
             depth: this.depth,
         }).info({
             event_type: "final_result",
+            result,
+        });
+
+        emitEvent({
+            event_type: "final_result",
+            run_id: this.run_id,
+            parent_run_id: this.parent_run_id,
+            depth: this.depth,
             result,
         });
 

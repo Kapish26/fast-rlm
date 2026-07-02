@@ -356,6 +356,37 @@ All config fields:
 | `max_prompt_tokens` | `int` | `200000` | Max total prompt tokens across all subagents |
 | `max_global_calls` | `int` | `∞` (50 for ACP) | Max total LLM calls across the whole run (root + all subagents) |
 
+## Progress & verbosity
+
+`run()` has two knobs for observing a run — one for the terminal, one for your code.
+
+**`verbosity`** controls how much the engine prints:
+
+| Value | Prints |
+|---|---|
+| `0` / `"silent"` | nothing |
+| `1` / `"summary"` | final result + global usage only |
+| `2` / `"full"` (default) | per-step boxes, spinners, and progress chatter |
+
+```python
+fast_rlm.run("...", config=config, verbosity="summary")
+```
+
+The legacy `verbose: bool` still works (`True` → `"full"`, `False` → `"silent"`) but is superseded by `verbosity`; when both are given, `verbosity` wins.
+
+**`on_step`** gives live, programmatic progress — a callback fired once per step (root and every sub-agent) as the run proceeds, so you don't have to tail the log file:
+
+```python
+def on_step(event: dict):
+    if event["event_type"] == "execution_result":
+        print(f"depth {event['depth']} step {event['step']}: "
+              f"{event['totalUsage']['completion_tokens']} completion tokens so far")
+
+result = fast_rlm.run("...", config=config, on_step=on_step)
+```
+
+Each `event` is a dict with `event_type` (`"code_generated"`, `"execution_result"`, or `"final_result"`), `run_id`, `parent_run_id`, and `depth`. Step events also carry `step`, `code`, `output`, `hasError`, `reasoning`, `usage`, `totalUsage`, and `timestamps` — the same data written to the JSONL log, delivered as it happens. `on_step` runs in a background thread and fires at any verbosity (including `"silent"`); an exception it raises is caught and warned about rather than aborting the run.
+
 ## Best Practices & Troubleshooting
 
 - **Place your task at the top or bottom of the prompt** — the REPL restricts how much context the LLM sees, so don't bury the task in the middle.

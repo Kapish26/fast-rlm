@@ -6,6 +6,33 @@ import type { Usage } from "./call_llm.ts";
 const GUTTER = "    │ ";
 const GUTTER_WIDTH = 6;
 
+// ── Verbosity ───────────────────────────────────────────────────────
+// Controls how much the engine prints to the terminal. The Python side
+// passes --verbosity N; higher shows more.
+//   0 silent  — nothing
+//   1 summary — final result + global usage only
+//   2 full    — per-step boxes, spinners, chatter (default)
+let verbosity = 2;
+
+export function setVerbosity(level: number): void {
+    if (Number.isFinite(level)) verbosity = level;
+}
+
+export function getVerbosity(): number {
+    return verbosity;
+}
+
+// A spinner stub returned when spinners are suppressed, matching the subset of
+// the yocto-spinner API the engine uses so call sites need no branching.
+const NOOP_SPINNER = {
+    success: (_text?: string) => NOOP_SPINNER,
+    error: (_text?: string) => NOOP_SPINNER,
+    warning: (_text?: string) => NOOP_SPINNER,
+    info: (_text?: string) => NOOP_SPINNER,
+    stop: () => NOOP_SPINNER,
+    start: (_text?: string) => NOOP_SPINNER,
+};
+
 function termWidth(): number {
     try {
         return Deno.consoleSize().columns;
@@ -49,6 +76,7 @@ export interface StepData {
 }
 
 export function printStep(data: StepData): void {
+    if (verbosity < 2) return;
     const { depth, step, maxSteps, code, output, hasError, reasoning, usage, totalUsage } = data;
     const w = boxWidth(depth);
     const parts: string[] = [];
@@ -150,14 +178,17 @@ export function printStep(data: StepData): void {
 // ── Standalone helpers (not part of a step) ─────────────────────────
 
 export function showPythonReady(depth: number): void {
+    if (verbosity < 2) return;
     console.log(indent(chalk.green.bold("✔ Python Ready"), depth));
 }
 
 export function showLlmQueryCall(depth: number): void {
+    if (verbosity < 2) return;
     console.log(indent(chalk.cyan.bold("↳ llm_query called"), depth));
 }
 
 export function showFinalResult(result: unknown, depth: number): void {
+    if (verbosity < 1) return;
     const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
     const w = boxWidth(depth);
     const banner = boxen(chalk.green(text), {
@@ -172,10 +203,12 @@ export function showFinalResult(result: unknown, depth: number): void {
 }
 
 export function startSpinner(text: string) {
+    if (verbosity < 2) return NOOP_SPINNER;
     return yoctoSpinner({ text }).start();
 }
 
 export function showGlobalUsage(totalUsage: Usage): void {
+    if (verbosity < 1) return;
     const fmt = (v: number | undefined | null, color: typeof chalk.cyan) =>
         v != null ? color(v.toLocaleString()) : color("Unknown");
     const fmtCost = (v: number | undefined | null) =>

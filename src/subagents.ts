@@ -24,7 +24,8 @@ import { isAcpModel } from "./acp.ts";
 // MCP never fetch or load the SDK.
 import type { McpHandle, McpServersConfig } from "./mcp.ts";
 import { Logger, setLogDir, setLogPrefix, getLogFile } from "./logging.ts";
-import { startSpinner, showGlobalUsage, printStep } from "./ui.ts";
+import { startSpinner, showGlobalUsage, printStep, setVerbosity, getVerbosity } from "./ui.ts";
+import { initEvents } from "./events.ts";
 import { trackUsage, getTotalUsage, resetUsage, trackCall, getTotalCalls } from "./usage.ts";
 import chalk from "npm:chalk@5";
 
@@ -172,7 +173,7 @@ export async function subagent(
             stdoutBuffer += text + "\n";
         },
     });
-    console.log("✔ Python Ready");
+    if (getVerbosity() >= 2) console.log("✔ Python Ready");
 
     // Make `requests` work inside the WASM REPL:
     //   1. loadPackage("micropip") — bundled with Pyodide, no network needed.
@@ -186,7 +187,7 @@ import micropip
 await micropip.install(["requests", "httpx"])
 `);
     const envSetupMs = Date.now() - envSetupStart;
-    console.log(`✔ requests + httpx ready (env setup took ${envSetupMs}ms)`);
+    if (getVerbosity() >= 2) console.log(`✔ requests + httpx ready (env setup took ${envSetupMs}ms)`);
 
     const pyProxyToJs = (val: unknown): unknown => {
         if (val && typeof (val as { toJs?: unknown }).toJs === "function") {
@@ -262,7 +263,7 @@ await micropip.install(["requests", "httpx"])
             }
             childInstruction = ci;
         }
-        console.log("↳ llm_query called");
+        if (getVerbosity() >= 2) console.log("↳ llm_query called");
 
         // Compression guard: if this delegation ships a large, barely-compressed
         // context, flag the child to self-confirm before it runs.
@@ -966,6 +967,19 @@ Output:\n${stdoutBuffer.trim()}
 if (import.meta.main) {
     resetUsage(); // Start fresh
 
+    // Parse --verbosity flag (must run before any logging/UI output)
+    const verbosityIdx = Deno.args.indexOf("--verbosity");
+    if (verbosityIdx !== -1 && Deno.args[verbosityIdx + 1]) {
+        const level = Number(Deno.args[verbosityIdx + 1]);
+        if (Number.isFinite(level)) setVerbosity(level);
+    }
+
+    // Parse --events-file flag (NDJSON step stream for the Python on_step callback)
+    const eventsIdx = Deno.args.indexOf("--events-file");
+    if (eventsIdx !== -1 && Deno.args[eventsIdx + 1]) {
+        initEvents(Deno.args[eventsIdx + 1]);
+    }
+
     // Parse --prefix flag
     const prefixIdx = Deno.args.indexOf("--prefix");
     if (prefixIdx !== -1 && Deno.args[prefixIdx + 1]) {
@@ -1043,7 +1057,7 @@ if (import.meta.main) {
             // Lazy import: pulls in @modelcontextprotocol/sdk only now, when MCP is used.
             const { connectMcpServers } = await import("./mcp.ts");
             mcpHandle = await connectMcpServers(parsedMcp);
-            console.log(
+            if (getVerbosity() >= 2) console.log(
                 `✔ MCP connected: ${mcpHandle.tools.length} tool(s), ` +
                 `${mcpHandle.resources.length} resource(s) across [${mcpHandle.serverNames.join(", ")}]`
             );
@@ -1083,7 +1097,7 @@ if (import.meta.main) {
 
         // Reprint the log file path for easy access
         const logFile = getLogFile();
-        if (logFile) {
+        if (logFile && getVerbosity() >= 2) {
             console.log(chalk.green(`\n📝 Log saved to: ${logFile}`));
             console.log(chalk.dim(`   View with: fast-rlm-log ${logFile} --tui`));
         }

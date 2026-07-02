@@ -43,7 +43,13 @@ def main():
     p.add_argument("--vertex", action="store_true",
                    help="Route models through Vertex AI (ADC auth).")
     p.add_argument("-q", "--quiet", action="store_true",
-                   help="Suppress the engine's streamed output.")
+                   help="Suppress the engine's streamed output (same as "
+                        "--verbosity silent).")
+    p.add_argument("--verbosity", default=None,
+                   choices=["silent", "summary", "full"],
+                   help="How much the engine prints: silent (nothing), summary "
+                        "(final result + usage), or full (per-step, default). "
+                        "Overrides -q/--quiet.")
     args = p.parse_args()
 
     if not args.prompt and not args.input_file:
@@ -84,6 +90,7 @@ def main():
         prefix=args.prefix,
         vertex=args.vertex,
         verbose=not args.quiet,
+        verbosity=args.verbosity,
     )
 
     results = data.get("results")
