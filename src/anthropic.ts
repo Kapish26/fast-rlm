@@ -36,17 +36,39 @@ export function stripAnthropicPrefix(model: string): string {
     return model.replace(/^anthropic\//, "");
 }
 
+// Anthropic does NOT prefix-cache automatically (unlike OpenAI/Gemini) — caching
+// requires an explicit `cache_control` breakpoint, and there is no working
+// top-level "automatic" flag (verified against the API). We add breakpoints so
+// Claude caches the same growing prefix the other backends cache for free.
+const CACHE_CONTROL = { type: "ephemeral" as const };
+
+// The (large, static) system prompt as one cached text block — this is the
+// dominant, always-reused prefix, so caching it is the biggest win.
+export function cachedSystem(text: string) {
+    return [{ type: "text", text, cache_control: CACHE_CONTROL }];
+}
+
 // fast-rlm messages are OpenAI-shaped {role, content}. Anthropic takes the system
 // prompt as a top-level param (built here, like the other backends) and a
-// user/assistant message list with string content.
+// user/assistant message list. We put a cache breakpoint on the LAST message so
+// the ENTIRE conversation-so-far is cached: as the loop appends turns, Claude
+// reads the longest previously-cached prefix (its 20-block lookback) and writes
+// only the extension — incremental prefix caching, like OpenAI's automatic mode.
 // deno-lint-ignore no-explicit-any
-function toAnthropicMessages(messages: any[]): any[] {
-    return messages
+export function toAnthropicMessages(messages: any[]): any[] {
+    const msgs = messages
         .filter((m) => m && m.role !== "system")
         .map((m) => ({
             role: m.role === "assistant" ? "assistant" : "user",
+            // content as a single text block so we can attach cache_control below.
             content: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""),
         }));
+    const last = msgs[msgs.length - 1];
+    if (last) {
+        // deno-lint-ignore no-explicit-any
+        (last as any).content = [{ type: "text", text: last.content, cache_control: CACHE_CONTROL }];
+    }
+    return msgs;
 }
 
 function extractReplCode(content: string): string {
@@ -99,7 +121,7 @@ async function anthropicComplete(
     const resp = await client.messages.create({
         model: stripAnthropicPrefix(model_name),
         max_tokens,
-        system: buildSystemPrompt(is_leaf_agent, promptOpts ?? {}),
+        system: cachedSystem(buildSystemPrompt(is_leaf_agent, promptOpts ?? {})),
         messages: toAnthropicMessages(messages),
         ...kwargs,
         // deno-lint-ignore no-explicit-any

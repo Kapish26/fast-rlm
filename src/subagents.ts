@@ -61,7 +61,7 @@ const MAX_CALLS = _config.max_calls_per_subagent ?? 20;
 // Root-only step cap (depth 0). null = fall back to MAX_CALLS. See config.ts.
 const MAX_STEPS: number | null = _config.max_steps ?? null;
 const MAX_DEPTH = _config.max_depth ?? 3;
-const TRUNCATE_LEN = _config.truncate_len ?? 5000;
+const TRUNCATE_LEN = _config.truncate_len ?? 10000;
 // primary_agent is required (no default). sub_agent falls back to primary_agent.
 function requirePrimaryAgent(): string {
     const p = _config.primary_agent;

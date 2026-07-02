@@ -351,8 +351,8 @@ All config fields:
 | `max_depth` | `int` | `3` | Max recursive subagent depth |
 | `max_calls_per_subagent` | `int` | `20` | Max LLM calls per subagent |
 | `max_steps` | `int` | `None` | Cap on the **root** agent's steps (depth 0). Falls back to `max_calls_per_subagent`. Provider-independent — bounds a run even when cost is unavailable. `max_steps=1` = single-shot, non-agentic call. |
-| `truncate_len` | `int` | `2000` | Output chars shown to the LLM per step |
-| `max_money_spent` | `float` | `1.0` | Hard budget cap in USD. On OpenRouter, real spend is read from `usage.cost_details` (the top-level `cost` is `0` for BYOK keys), so the cap fires correctly. Where no cost is reported, use `max_steps` / `max_global_calls` to bound the run. |
+| `truncate_len` | `int` | `10000` | Output chars shown to the LLM per step. **Quality-critical** for document/navigation tasks — too low and the model sees only a truncated slice of gathered results and guesses the rest. Raise further for large-context extraction. |
+| `max_money_spent` | `float` | `0.2` | Hard budget cap in USD. On OpenRouter, real spend is read from `usage.cost_details` (the top-level `cost` is `0` for BYOK keys), so the cap fires correctly. Where no cost is reported, use `max_steps` / `max_global_calls` to bound the run. |
 | `max_completion_tokens` | `int` | `50000` | Max total completion tokens across all subagents |
 | `max_prompt_tokens` | `int` | `200000` | Max total prompt tokens across all subagents |
 | `max_global_calls` | `int` | `∞` (50 for ACP) | Max total LLM calls across the whole run (root + all subagents) |
@@ -488,11 +488,11 @@ Edit `rlm_config.yaml` at the project root:
 ```yaml
 max_calls_per_subagent: 20
 max_depth: 3
-truncate_len: 2000
+truncate_len: 10000
 primary_agent: "z-ai/glm-5"   # REQUIRED — no default
 # sub_agent is optional; omit it to reuse primary_agent for subagents
 sub_agent: "minimax/minimax-m2.5"
-max_money_spent: 1.0
+max_money_spent: 0.2
 max_completion_tokens: 50000
 max_prompt_tokens: 200000
 ```
@@ -560,6 +560,8 @@ export ANTHROPIC_BASE_URL=https://my-proxy.example.com   # optional; defaults to
 primary_agent: "claude-haiku-4-5"        # or "anthropic/claude-sonnet-4-6"
 ```
 Token usage is reported (so budgets apply); cost shows `Unknown` (the SDK returns no cost).
+
+**Prompt caching is automatic.** Unlike OpenAI/Gemini (which cache prefixes on their own), Claude only caches when asked, so fast-rlm attaches `cache_control` breakpoints to the system prompt and the latest message on every native-Anthropic call. This caches the large static system prompt *and* the growing conversation prefix incrementally — matching the automatic caching other providers give you. Cache hits show up as `cached_tokens` in usage. (This applies to the native path only; Claude routed through OpenRouter without an `ANTHROPIC_API_KEY` does not yet get caching.)
 
 ### 4. ACP coding agent
 

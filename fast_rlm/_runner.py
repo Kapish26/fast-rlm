@@ -144,7 +144,12 @@ class RLMConfig:
     # cost/token usage is unavailable (e.g. ACP, or a backend that reports no
     # cost). max_steps=1 makes the root a single-shot, non-agentic call.
     max_steps: Optional[int] = None
-    truncate_len: int = 2000
+    # Chars of REPL stdout shown to the model per step. Quality-critical for
+    # document/navigation tasks: too low and the model only sees a truncated
+    # slice of gathered results (offsets, IDs, candidates) and is forced to guess
+    # the rest, hurting grounding/citation accuracy. Default raised from 2000 to
+    # 10000 after user reports; raise further for large-context extraction.
+    truncate_len: int = 10000
     max_money_spent: float = 0.2
     max_completion_tokens: int = 50000
     max_prompt_tokens: int = 200000
