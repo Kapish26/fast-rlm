@@ -26,6 +26,16 @@ import type { McpHandle, McpServersConfig } from "./mcp.ts";
 import { Logger, setLogDir, setLogPrefix, getLogFile } from "./logging.ts";
 import { startSpinner, showGlobalUsage, printStep, setVerbosity, getVerbosity } from "./ui.ts";
 import { initEvents } from "./events.ts";
+import {
+    applySweep,
+    buildSessionPreamble,
+    emptySessionState,
+    loadSessionState,
+    makeSessionWriter,
+    SESSION_PROBE_PY,
+    SESSION_SETUP_PY,
+} from "./session.ts";
+import type { SessionState, SessionVariable, SweepResult } from "./session.ts";
 import { trackUsage, getTotalUsage, resetUsage, trackCall, getTotalCalls } from "./usage.ts";
 import chalk from "npm:chalk@5";
 
@@ -159,6 +169,10 @@ export async function subagent(
     // llm_query(instruction=...) for a child. Never inherited — a child sees only
     // what its parent explicitly passed, with no carry-on from ancestors.
     instruction?: string | null,
+    // Resumable session (root agent only; sub-agents never see session state).
+    // From --session-file: the state path plus previously saved state (or null
+    // on a fresh session). The heap is swept to disk after every step.
+    session?: { file: string; state: SessionState | null; includeCode: boolean } | null,
 ) {
     // Structured I/O ablation: when disabled, ignore any requested output schema
     // (no validation, no schema preamble) and present dict/list contexts as plain
@@ -656,6 +670,53 @@ async def mcp_read_resource(uri, server=None):
 `);
     }
 
+    // ---- Session mode (root only) ------------------------------------------
+    // Install the sweep/restore/commit helpers, restore prior state into the
+    // fresh REPL, and record the pending query so even a step-1 crash leaves a
+    // resumable trace. The baseline capture in SESSION_SETUP_PY must run AFTER
+    // setup/tools/MCP so all engine names are excluded from the sweep.
+    const sessionEnabled = session != null && subagent_depth === 0;
+    let sessionState: SessionState = emptySessionState();
+    let sessionPreamble = "";
+    const sessionPreserve = new Set<string>();
+    const prevSaved: { variables: Record<string, SessionVariable>; functions: Record<string, string> } =
+        { variables: {}, functions: {} };
+    const persistSession = sessionEnabled ? makeSessionWriter(session!.file) : null;
+    if (sessionEnabled) {
+        await pyodide.runPythonAsync(SESSION_SETUP_PY);
+        if (session!.state) {
+            sessionState = session!.state;
+            prevSaved.variables = { ...sessionState.variables };
+            prevSaved.functions = { ...sessionState.functions };
+            const payload = JSON.stringify({
+                variables: sessionState.variables,
+                functions: sessionState.functions,
+            });
+            try {
+                const resJson = await pyodide.runPythonAsync(
+                    `__session_restore__(${JSON.stringify(payload)})`,
+                );
+                const res = JSON.parse(String(resJson)) as { failed?: Record<string, string> };
+                // Names that failed to restore are invisible to future sweeps;
+                // keep their saved entries instead of silently erasing them.
+                for (const n of Object.keys(res.failed ?? {})) sessionPreserve.add(n);
+            } catch (e) {
+                console.error(`[session] restore failed: ${e instanceof Error ? e.message : e}`);
+            }
+            if (getVerbosity() >= 2) console.log("✔ Session state restored");
+        }
+        // Preamble reflects the state as loaded (including a pending query left
+        // by a crashed run) — built before we stamp the CURRENT query as pending.
+        sessionPreamble = buildSessionPreamble(sessionState, 1500, session!.includeCode);
+        const queryText = typeof effectiveContext === "string"
+            ? effectiveContext
+            : JSON.stringify(effectiveContext);
+        sessionState.pending_query = queryText.length > 4000
+            ? queryText.slice(0, 4000) + "...[truncated]"
+            : queryText;
+        await persistSession!(sessionState);
+    }
+
     const mcpProbeCode = mcpEnabled
         ? `print("---")
 _mcp_servers = sorted({s for s in __mcp_allowed_servers__} if __mcp_allowed_servers__ is not None else {t["server"] for t in __mcp_data__["tools"]} | {r["server"] for r in __mcp_data__["resources"]} | {t["server"] for t in __mcp_data__["resourceTemplates"]})
@@ -728,14 +789,14 @@ else:
         print(f"Last 500 characters of str(context): ", str(context)[-500:])
     else:
         print(f"Context: ", context)
-${toolsProbeCode}${mcpProbeCode}`
+${toolsProbeCode}${mcpProbeCode}${sessionEnabled ? SESSION_PROBE_PY : ""}`
     stdoutBuffer = "";
     const step0ExecStart = now();
     await pyodide.runPythonAsync(initial_code);
     const step0ExecEnd = now();
     let messages = [
         {
-            "role": "user", "content": `
+            "role": "user", "content": `${sessionPreamble}
 Outputs will always be truncated to last ${TRUNCATE_LEN} characters.
 code:\n\`\`\`repl\n${initial_code}\n\`\`\`\n
 Output:\n${stdoutBuffer.trim()}
@@ -875,9 +936,11 @@ Output:\n${stdoutBuffer.trim()}
         stdoutBuffer = "";
 
         const execStart = now();
+        let execThrew = false;
         try {
             await pyodide.runPythonAsync(code);
         } catch (error) {
+            execThrew = true;
             if (error instanceof Error) {
                 stdoutBuffer += `\nError: ${error.message} `;
             } else {
@@ -885,6 +948,27 @@ Output:\n${stdoutBuffer.trim()}
             }
         }
         const execEnd = now();
+
+        // Session: snapshot the heap after every step (crash-safety), passing
+        // the step's code so comments/function defs are harvested from it.
+        if (sessionEnabled) {
+            try {
+                const sweepJson = await pyodide.runPythonAsync(
+                    `__session_sweep__(${JSON.stringify(code)})`,
+                );
+                const sweep = JSON.parse(String(sweepJson)) as SweepResult;
+                applySweep(
+                    sessionState,
+                    sweep,
+                    { q: sessionState.queries.length, step: i + 1, ok: !execThrew, code },
+                    sessionPreserve,
+                    prevSaved,
+                );
+                await persistSession!(sessionState);
+            } catch (e) {
+                console.error(`[session] sweep failed: ${e instanceof Error ? e.message : e}`);
+            }
+        }
         let truncatedText = truncateText(stdoutBuffer);
 
         const stepTimestamps = {
@@ -944,6 +1028,26 @@ Output:\n${stdoutBuffer.trim()}
                 reasoning: message.reasoning,
                 usage, totalUsage: getTotalUsage(), timestamps: stepTimestamps,
             });
+            // Session: move the pending query into the ledger with its answer.
+            if (sessionEnabled) {
+                try {
+                    let finalForState: unknown = result;
+                    try {
+                        JSON.stringify(result);
+                    } catch {
+                        finalForState = String(result);
+                    }
+                    sessionState.queries.push({
+                        query: sessionState.pending_query ?? "",
+                        final: finalForState,
+                    });
+                    sessionState.pending_query = null;
+                    await persistSession!(sessionState);
+                } catch (e) {
+                    console.error(`[session] final write failed: ${e instanceof Error ? e.message : e}`);
+                }
+            }
+
             logger.logFinalResult(result);
             logger.logAgentEnd();
             return result;
@@ -1086,9 +1190,22 @@ if (import.meta.main) {
             rootLlmKwargs = parsed as Record<string, unknown>;
         }
 
+        // Resumable session: --session-file <path>. Prior state (if the file
+        // exists) is restored into the root REPL; the heap is swept back to the
+        // file after every step.
+        const sessionIdx = Deno.args.indexOf("--session-file");
+        let sessionArg: { file: string; state: SessionState | null; includeCode: boolean } | null = null;
+        if (sessionIdx !== -1 && Deno.args[sessionIdx + 1]) {
+            const sf = Deno.args[sessionIdx + 1];
+            // --no-session-code drops the historical code dump from the resume
+            // preamble (add_session_code_to_context=False in the Python API).
+            const includeCode = Deno.args.indexOf("--no-session-code") === -1;
+            sessionArg = { file: sf, state: loadSessionState(sf), includeCode };
+        }
+
         // Root agent: mcpAllowedServers = null → sees all configured servers.
         // ROOT_INSTRUCTION (from run(instruction=...)) applies to the root only.
-        out = await subagent(query_context, 0, undefined, rootSchema, rootTools, rootEnv, mcpHandle, null, rootLlmKwargs, undefined, ROOT_INSTRUCTION);
+        out = await subagent(query_context, 0, undefined, rootSchema, rootTools, rootEnv, mcpHandle, null, rootLlmKwargs, undefined, ROOT_INSTRUCTION, sessionArg);
 
         // Final result is already logged inside subagent()
         // Show global usage across all runs

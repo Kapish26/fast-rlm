@@ -42,6 +42,18 @@ def main():
     p.add_argument("--prefix", default=None, help="Log filename prefix.")
     p.add_argument("--log-dir", default=None,
                    help="Directory for the run's .jsonl transcript (default: ./logs).")
+    p.add_argument("--session-dir", default=None,
+                   help="Directory of a persistent, resumable session (created if "
+                        "missing). Variables/functions the agent builds are saved "
+                        "after every step and restored on the next run over the "
+                        "same directory.")
+    p.add_argument("--session-id", default=None,
+                   help="Name of the session within --session-dir; state lives in "
+                        "<session-dir>/<session-id>. Requires --session-dir.")
+    p.add_argument("--no-session-code", action="store_true",
+                   help="On resume, omit earlier queries' code from the agent's "
+                        "context (keeps the resume prompt smaller; loses the "
+                        "speed-up from reusing prior code). Default: code included.")
     p.add_argument("--vertex", action="store_true",
                    help="Route models through Vertex AI (ADC auth).")
     p.add_argument("-q", "--quiet", action="store_true",
@@ -59,6 +71,9 @@ def main():
 
     if args.input_file and not os.path.exists(args.input_file):
         p.error(f"input file not found: {args.input_file}")
+
+    if args.session_id and not args.session_dir:
+        p.error("--session-id requires --session-dir.")
 
     config: dict = {}
     if args.primary_agent:
@@ -91,6 +106,9 @@ def main():
         config=config or None,
         prefix=args.prefix,
         log_dir=args.log_dir,
+        session_dir=args.session_dir,
+        session_id=args.session_id,
+        add_session_code_to_context=not args.no_session_code,
         vertex=args.vertex,
         verbose=not args.quiet,
         verbosity=args.verbosity,

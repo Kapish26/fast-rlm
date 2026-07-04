@@ -22,6 +22,26 @@ import yaml
 _VERBOSITY_LEVELS = {"silent": 0, "quiet": 0, "summary": 1, "full": 2, "verbose": 2}
 
 
+def resolve_session_dir(
+    session_id: Optional[str], session_dir: Optional[str]
+) -> Optional[str]:
+    """Map (session_id, session_dir) to the directory that holds ``state.json``.
+
+    - both ``None``          -> ``None`` (no on-disk session)
+    - ``session_dir`` only   -> ``session_dir`` itself
+    - both set               -> ``<session_dir>/<session_id>``
+    - ``session_id`` only    -> ``ValueError`` (an id needs a dir to live in)
+    """
+    if session_id is not None and session_dir is None:
+        raise ValueError(
+            "session_id requires session_dir. Pass session_dir=... too, or omit "
+            "both for an ephemeral in-memory session."
+        )
+    if session_dir is None:
+        return None
+    return os.path.join(session_dir, session_id) if session_id is not None else session_dir
+
+
 def _normalize_verbosity(verbosity: Optional["int | str"], verbose: bool) -> int:
     """Resolve the effective verbosity level (0-2).
 
@@ -306,6 +326,9 @@ def run(
     verbosity: Optional["int | str"] = None,
     on_step: Optional[Callable[[dict], None]] = None,
     log_dir: Optional[str] = None,
+    session_dir: Optional[str] = None,
+    session_id: Optional[str] = None,
+    add_session_code_to_context: bool = True,
 ) -> dict:
     """Run a fast-rlm query.
 
@@ -381,6 +404,28 @@ def run(
         log_dir: Optional directory for the run's ``.jsonl`` transcript. Defaults
             to ``<cwd>/logs``. The returned dict's ``log_file`` gives the exact
             path written, so callers can locate/tail the live transcript.
+        session_dir: Optional directory holding a persistent, resumable session
+            (created if missing). When set, the root agent's picklable REPL
+            variables and REPL-defined functions are saved to
+            ``<session_dir>/state.json`` after every step, and a later run over
+            the same directory restores them and shows the agent the prior
+            queries + code (with comments) so it continues where it left off.
+            Crash-safe: state is written per step, not at the end. Not a 1:1
+            process clone — open handles, generators, and JS proxies are
+            dropped (and reported to the agent). Prefer the ``fast_rlm.Session``
+            wrapper over passing this directly.
+        session_id: Optional name for the session; when set, state lives in
+            ``<session_dir>/<session_id>/state.json`` so several named sessions
+            can share one ``session_dir``. Requires ``session_dir`` (passing
+            ``session_id`` without it raises ``ValueError``).
+        add_session_code_to_context: When resuming a session, include the code
+            the agent ran in earlier queries in its resume preamble (default
+            ``True``). This lets the agent reuse *how* it built things rather
+            than re-deriving them; experiments show it materially speeds up
+            follow-up queries. Set ``False`` to omit it (only the query→FINAL
+            ledger and restored variables are shown) when minimizing prompt
+            size matters more than resume efficiency. No effect without a
+            session.
 
     Returns:
         Dict with 'results', 'usage', and 'log_file' (path to the run's
@@ -469,6 +514,13 @@ def run(
 
     if prefix:
         cmd += ["--prefix", prefix]
+
+    resolved_session_dir = resolve_session_dir(session_id, session_dir)
+    if resolved_session_dir is not None:
+        os.makedirs(resolved_session_dir, exist_ok=True)
+        cmd += ["--session-file", os.path.join(os.path.abspath(resolved_session_dir), "state.json")]
+        if not add_session_code_to_context:
+            cmd.append("--no-session-code")
 
     # NDJSON step stream for the on_step callback; tailed live below.
     events_tmpfile = None

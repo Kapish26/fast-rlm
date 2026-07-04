@@ -49,6 +49,7 @@ nav:
       - Quick Start: getting-started/quickstart.md
   - Guide:
       - Configuration: guide/configuration.md
+      - Resumable Sessions: guide/sessions.md
       - Advanced Customization: guide/advanced.md
       - ACP Agents: guide/acp-agents.md
       - Log Viewer: guide/log-viewer.md

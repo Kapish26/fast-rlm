@@ -248,6 +248,42 @@ Behavior:
 - Tools read them with the normal `os.environ["..."]` (do the `import os` inside the tool body — see the self-containment rule above).
 
 
+## Resumable sessions
+
+A `Session` lets follow-up queries reuse the work of earlier ones instead of re-exploring from scratch. After every step, the root agent's picklable REPL variables are auto-saved, REPL-defined functions/classes are saved as source, and comments the agent wrote next to assignments are attached to the variables they describe. The next `query()` restores everything into a fresh REPL and shows the agent the prior queries + answers and the code it ran — so it continues where it left off.
+
+```python
+import fast_rlm
+
+session = fast_rlm.Session(session_dir="sessions", session_id="podcasts",
+                           config={"primary_agent": "z-ai/glm-5"})
+
+r1 = session.query("Here are all transcripts... Build a guest index and "
+                   "summarize what the ML guests said about AGI.\n" + transcripts)
+r2 = session.query("Using the index you already built: which guests were most "
+                   "optimistic about AGI timelines?")   # no re-exploration
+
+session.variables()   # {name: {type, preview, comment, note, committed}}
+session.queries()     # [{"query": ..., "final": ...}, ...]
+```
+
+Where state lives (both args optional):
+
+- `Session()` — **ephemeral**: state is kept in a private temp dir and deleted when the object is closed/collected. Every `Session()` starts from a clean slate — the safe default for experiments.
+- `Session(session_dir="sessions")` — persistent at `sessions/state.json`; re-open the same dir to resume.
+- `Session(session_dir="sessions", session_id="podcasts")` — persistent at `sessions/podcasts/state.json`; `session_id` namespaces several sessions under one dir. (`session_id` without `session_dir` raises.)
+
+Also available as `run(..., session_dir=..., session_id=...)` and `fast-rlm --session-dir ... --session-id ...`.
+
+Behavior and limits:
+
+- **Crash-safe.** State is written after every step (atomically), not at the end — a killed run resumes from its last completed step.
+- **Not a 1:1 process clone.** Open handles, generators, and JS proxies don't survive; they're reported to the agent as dropped on resume. Variables over 5 MB pickled are skipped.
+- **The conversation is not carried.** A resumed query starts a fresh conversation seeded with the query/answer ledger, the code dump (comments included), and a live inventory of restored variables — so per-query context stays bounded no matter how old the session is.
+- **Showing earlier code makes follow-ups faster.** By default the resumed agent sees the code it ran before (`add_session_code_to_context=True`, CLI `--no-session-code` to disable). In our experiments this made multi-query sessions markedly cheaper — the agent reuses *how* it built things instead of re-exploring the restored state each time — while staying just as accurate. Turn it off only when minimizing the resume prompt matters more than speed.
+- **`context` is not saved** (it holds each query anew). The agent has a `commit(name, note="...")` function to annotate a variable or force-save skipped names like `context`.
+- **Sub-agents are unaffected** — they stay fresh and isolated; only the root agent's state persists.
+
 ## Custom instructions
 
 Pass a directive through the `instruction` kwarg on `fast_rlm.run(...)`. When provided, it is appended to the **end** of the agent's system prompt:
