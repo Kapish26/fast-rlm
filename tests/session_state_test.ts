@@ -9,7 +9,9 @@ import {
     applySweep,
     buildSessionPreamble,
     emptySessionState,
+    loadSessionState,
     SESSION_SETUP_PY,
+    SESSION_STATE_VERSION,
 } from "../src/session.ts";
 import type { SweepResult } from "../src/session.ts";
 
@@ -112,6 +114,23 @@ ck("preamble includes code dump w/ comments", preamble.includes("# index of gues
 const preambleNoCode = buildSessionPreamble(state, 1500, false);
 ck("includeCode=false keeps the query ledger", preambleNoCode.includes("Build an index of the corpus"));
 ck("includeCode=false omits the code dump", !preambleNoCode.includes("Code executed in earlier runs"));
+
+console.log("\n[D2] v1 state migrates on load without data loss");
+const v1Path = Deno.makeTempFileSync({ suffix: ".json" });
+Deno.writeTextFileSync(v1Path, JSON.stringify({
+    version: 1,
+    queries: [{ query: "old q", final: "old ans" }],
+    pending_query: null, code_log: [], variables: {}, functions: {}, dropped: {},
+}));
+const migrated = loadSessionState(v1Path);
+ck("v1 state still loads (no data loss)", migrated !== null && migrated.queries.length === 1);
+ck("v1 state stamped to current version", migrated?.version === SESSION_STATE_VERSION);
+ck("future version refused", loadSessionState((() => {
+    const p = Deno.makeTempFileSync({ suffix: ".json" });
+    Deno.writeTextFileSync(p, JSON.stringify({ version: 999, queries: [] }));
+    return p;
+})()) === null);
+Deno.removeSync(v1Path);
 
 console.log("\n[E] baseline-collision variables are parked under *_saved");
 // Simulate an earlier run that committed 'context' (baseline name).

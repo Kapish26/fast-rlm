@@ -1,9 +1,9 @@
 import { createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
-import { useState, useMemo, useCallback } from "react";
-import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
-import { readFileSync } from "fs";
-import { resolve } from "path";
+import { useState, useMemo, useCallback, useEffect } from "react";
+import { useKeyboard, useRenderer, useTerminalDimensions, useTimeline } from "@opentui/react";
+import { readFileSync, statSync, existsSync } from "fs";
+import { resolve, basename, dirname, join as joinPath } from "path";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -192,7 +192,7 @@ function getRunTotalUsage(run: RunTree): Usage {
       total_tokens: acc.total_tokens + u.total_tokens,
       cached_tokens: acc.cached_tokens + u.cached_tokens,
       reasoning_tokens: acc.reasoning_tokens + u.reasoning_tokens,
-      cost: acc.cost + u.cost,
+      cost: acc.cost + (u.cost || 0), // some steps report no cost -> avoid NaN
     };
   }, zero);
 }
@@ -941,7 +941,7 @@ function TimelineView({
   );
 }
 
-function HelpBar({ width, showTimeline, hasTimestamps }: { width: number; showTimeline?: boolean; hasTimestamps?: boolean }) {
+function HelpBar({ width, showTimeline, hasTimestamps, inSession }: { width: number; showTimeline?: boolean; hasTimestamps?: boolean; inSession?: boolean }) {
   if (showTimeline) {
     return (
       <box width={width} flexDirection="row" gap={1}>
@@ -954,13 +954,24 @@ function HelpBar({ width, showTimeline, hasTimestamps }: { width: number; showTi
   return (
     <box width={width} flexDirection="row" gap={1}>
       <text fg="#888888">
-        <span fg="#7aa2f7">↑↓</span>:steps  <span fg="#7aa2f7">←→</span>:parent/child  <span fg="#7aa2f7">Tab/S-Tab</span>:siblings  <span fg="#7aa2f7">H/J</span>:code  <span fg="#7aa2f7">K/L</span>:output  <span fg="#7aa2f7">R</span>:reasoning  <span fg="#7aa2f7">O</span>:final output  {hasTimestamps && <><span fg="#7aa2f7">T</span>:timeline  </>}<span fg="#7aa2f7">q/^C</span>:quit
+        <span fg="#7aa2f7">↑↓</span>:steps  <span fg="#7aa2f7">←→</span>:parent/child  <span fg="#7aa2f7">Tab</span>:siblings  <span fg="#7aa2f7">H/J</span>:code  <span fg="#7aa2f7">K/L</span>:output  <span fg="#7aa2f7">I</span>:input  <span fg="#7aa2f7">R</span>:reason  <span fg="#7aa2f7">O</span>:final  {hasTimestamps && <><span fg="#7aa2f7">T</span>:timeline  </>}{inSession && <><span fg="#7aa2f7">[ ]</span>:query  <span fg="#7aa2f7">Esc</span>:session  </>}<span fg="#7aa2f7">q</span>:quit
       </text>
     </box>
   );
 }
 
-function App({ logData }: { logData: { rootRuns: RunTree[]; runs: Map<string, RunTree>; hasTimestamps: boolean } }) {
+// When the run viewer is opened as a drill-down from a session, this context
+// wires up "back to session" and prev/next-query navigation and a header.
+interface SessionCtx {
+  index: number; // 0-based
+  total: number;
+  queryText: string;
+  onBack: () => void;
+  onPrev: () => void;
+  onNext: () => void;
+}
+
+export function App({ logData, sessionCtx }: { logData: { rootRuns: RunTree[]; runs: Map<string, RunTree>; hasTimestamps: boolean }; sessionCtx?: SessionCtx }) {
   const renderer = useRenderer();
   const { width, height } = useTerminalDimensions();
   const { rootRuns, runs, hasTimestamps } = logData;
@@ -983,6 +994,8 @@ function App({ logData }: { logData: { rootRuns: RunTree[]; runs: Map<string, Ru
   const [reasoningScroll, setReasoningScroll] = useState(0);
   const [showFullOutput, setShowFullOutput] = useState(false);
   const [fullOutputScroll, setFullOutputScroll] = useState(0);
+  const [showInput, setShowInput] = useState(false);
+  const [inputScroll, setInputScroll] = useState(0);
   const [showTimeline, setShowTimeline] = useState(false);
   const [timelineVScroll, setTimelineVScroll] = useState(0);
 
@@ -1050,11 +1063,20 @@ function App({ logData }: { logData: { rootRuns: RunTree[]; runs: Map<string, Ru
     return out;
   }, [activeStep, isLastStep, activeRun]);
 
+  // The user input that seeded the active run: the session query for the root
+  // run, else the run's step-0 context echo (a sub-agent's delegated prompt).
+  const userInput = useMemo(() => {
+    if (activeRun.depth === 0 && sessionCtx?.queryText?.trim()) return sessionCtx.queryText.trim();
+    const step0 = activeRun.steps.find((s) => (s.step ?? 0) === 0);
+    return step0?.output?.trim() || "(no recorded input for this run)";
+  }, [activeRun, sessionCtx]);
+
   const leftPanelWidth = Math.min(30, Math.floor(width * 0.25));
   const rightPanelWidth = width - leftPanelWidth;
   const infoHeight = 6; // 3 content lines + 2 borders + 1 padding
   const helpHeight = 1;
-  const mainHeight = height - helpHeight;
+  const headerHeight = sessionCtx ? 1 : 0;
+  const mainHeight = height - helpHeight - headerHeight;
   const codeOutputHeight = Math.max(5, mainHeight - infoHeight);
 
   useKeyboard(
@@ -1065,15 +1087,24 @@ function App({ logData }: { logData: { rootRuns: RunTree[]; runs: Map<string, Ru
           if (showTimeline) { setShowTimeline(false); return; }
           if (showReasoning) { setShowReasoning(false); return; }
           if (showFullOutput) { setShowFullOutput(false); return; }
+          if (showInput) { setShowInput(false); return; }
           renderer.destroy();
           return;
         }
 
-        // Esc - close any modal/timeline
-        if (key.name === "escape") {
+        // Esc / Backspace - close any modal/timeline, else back to the session
+        if (key.name === "escape" || key.name === "backspace") {
           if (showTimeline) { setShowTimeline(false); return; }
           if (showReasoning) { setShowReasoning(false); return; }
           if (showFullOutput) { setShowFullOutput(false); return; }
+          if (showInput) { setShowInput(false); return; }
+          if (sessionCtx) { sessionCtx.onBack(); return; }
+        }
+
+        // [ / ] - previous / next query in the session (drill-down mode)
+        if (sessionCtx && !showTimeline && !showReasoning && !showFullOutput && !showInput) {
+          if (key.name === "[" || key.sequence === "[") { sessionCtx.onPrev(); return; }
+          if (key.name === "]" || key.sequence === "]") { sessionCtx.onNext(); return; }
         }
 
         // T - toggle timeline view (only when timestamp data is present)
@@ -1104,9 +1135,15 @@ function App({ logData }: { logData: { rootRuns: RunTree[]; runs: Map<string, Ru
 
         // O - toggle final output modal
         if (key.name === "o") {
-          const out = activeStep?.output ?? "";
           if (showFullOutput) { setShowFullOutput(false); }
-          else { setShowFullOutput(true); setFullOutputScroll(0); setShowReasoning(false); }
+          else { setShowFullOutput(true); setFullOutputScroll(0); setShowReasoning(false); setShowInput(false); }
+          return;
+        }
+
+        // I - toggle user-input modal (the query/context that seeded this run)
+        if (key.name === "i") {
+          if (showInput) { setShowInput(false); }
+          else { setShowInput(true); setInputScroll(0); setShowReasoning(false); setShowFullOutput(false); }
           return;
         }
 
@@ -1119,6 +1156,11 @@ function App({ logData }: { logData: { rootRuns: RunTree[]; runs: Map<string, Ru
         if (showFullOutput) {
           if (key.name === "h" || key.name === "up") setFullOutputScroll((s) => Math.max(0, s - 3));
           else if (key.name === "j" || key.name === "down") setFullOutputScroll((s) => s + 3);
+          return;
+        }
+        if (showInput) {
+          if (key.name === "h" || key.name === "up") setInputScroll((s) => Math.max(0, s - 3));
+          else if (key.name === "j" || key.name === "down") setInputScroll((s) => s + 3);
           return;
         }
 
@@ -1238,12 +1280,24 @@ function App({ logData }: { logData: { rootRuns: RunTree[]; runs: Map<string, Ru
           return;
         }
       },
-      [activeRun, activeStepIndex, runs, showReasoning, showFullOutput, showTimeline, timelineData, hasTimestamps],
+      [activeRun, activeStepIndex, runs, showReasoning, showFullOutput, showInput, showTimeline, timelineData, hasTimestamps, sessionCtx],
     ),
   );
 
   return (
     <box position="relative" flexDirection="column" width="100%" height="100%">
+      {/* Session drill-down header */}
+      {sessionCtx && (
+        <box width={width} flexDirection="row" backgroundColor="#12121c" paddingLeft={1} paddingRight={1}>
+          <text>
+            <span fg="#565f89">◄ </span>
+            <span fg="#7aa2f7"><strong>QUERY {sessionCtx.index + 1}</strong></span>
+            <span fg="#565f89">/{sessionCtx.total}</span>
+            <span fg="#3b4261">  ·  </span>
+            <span fg="#a9b1d6">{truncate(sessionCtx.queryText, Math.max(10, width - 40))}</span>
+          </text>
+        </box>
+      )}
       {/* Timeline view replaces main content when active */}
       {showTimeline ? (
         <TimelineView
@@ -1303,7 +1357,7 @@ function App({ logData }: { logData: { rootRuns: RunTree[]; runs: Map<string, Ru
       )}
 
       {/* Help bar */}
-      <HelpBar width={width} showTimeline={showTimeline} hasTimestamps={hasTimestamps} />
+      <HelpBar width={width} showTimeline={showTimeline} hasTimestamps={hasTimestamps} inSession={!!sessionCtx} />
 
       {/* Reasoning modal */}
       {showReasoning && (
@@ -1314,6 +1368,18 @@ function App({ logData }: { logData: { rootRuns: RunTree[]; runs: Map<string, Ru
           width={width}
           height={height}
           borderColor="#bd93f9"
+        />
+      )}
+
+      {/* User input modal */}
+      {showInput && (
+        <ScrollableModal
+          content={userInput}
+          title="  User Input [H/J scroll, Esc/I close]  "
+          scroll={inputScroll}
+          width={width}
+          height={height}
+          borderColor="#7aa2f7"
         />
       )}
 
@@ -1332,30 +1398,607 @@ function App({ logData }: { logData: { rootRuns: RunTree[]; runs: Map<string, Ru
   );
 }
 
+// ── Session mode ─────────────────────────────────────────────────────
+
+interface SessionQueryMeta {
+  query: string;
+  final: unknown;
+  log_file?: string | null;
+  run_id?: string | null;
+}
+
+interface SessionStateFile {
+  version?: number;
+  queries?: SessionQueryMeta[];
+  pending_query?: string | null;
+  variables?: Record<string, unknown>;
+  functions?: Record<string, unknown>;
+  dropped?: Record<string, unknown>;
+  code_log?: { q: number; step: number; ok: boolean; code: string }[];
+}
+
+type LogData = ReturnType<typeof parseLogFile>;
+
+interface QueryInfo {
+  meta: SessionQueryMeta;
+  steps: number;
+  usage: Usage;
+  linked: boolean;
+  logData?: LogData;
+}
+
+const ZERO_USAGE: Usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, cost: 0 };
+
+function sumRunsUsage(runs: Map<string, RunTree>): Usage {
+  let total = { ...ZERO_USAGE };
+  for (const run of runs.values()) {
+    const u = getRunTotalUsage(run);
+    total = {
+      prompt_tokens: total.prompt_tokens + u.prompt_tokens,
+      completion_tokens: total.completion_tokens + u.completion_tokens,
+      total_tokens: total.total_tokens + u.total_tokens,
+      cached_tokens: total.cached_tokens + u.cached_tokens,
+      reasoning_tokens: total.reasoning_tokens + u.reasoning_tokens,
+      cost: total.cost + u.cost,
+    };
+  }
+  return total;
+}
+
+// Read each query's linked run log (if present) and precompute its stats so the
+// overview renders instantly; unlinked queries fall back to code_log step counts.
+export function buildQueryInfos(state: SessionStateFile): QueryInfo[] {
+  const codeLog = state.code_log ?? [];
+  return (state.queries ?? []).map((meta, i) => {
+    if (meta.log_file) {
+      try {
+        const content = readFileSync(meta.log_file, "utf-8");
+        const logData = parseLogFile(content);
+        const rootSteps = logData.rootRuns.reduce((n, r) => n + r.steps.length, 0);
+        return { meta, steps: rootSteps, usage: sumRunsUsage(logData.runs), linked: true, logData };
+      } catch {
+        // fall through to unlinked
+      }
+    }
+    const steps = codeLog.filter((e) => e.q === i && e.ok).length;
+    return { meta, steps, usage: { ...ZERO_USAGE }, linked: false };
+  });
+}
+
+// Green → amber → red by how a value compares to the session max.
+function heatColor(value: number, max: number): string {
+  if (max <= 0) return "#50fa7b";
+  const f = value / max;
+  if (f < 0.34) return "#50fa7b";
+  if (f < 0.67) return "#f1fa8c";
+  return "#ff7a93";
+}
+
+function finalToStr(final: unknown): string {
+  if (final === undefined || final === null) return "—";
+  return typeof final === "object" ? JSON.stringify(final) : String(final);
+}
+
+function bar(fraction: number, width: number): { filled: number } {
+  const f = Math.max(0, Math.min(1, fraction));
+  return { filled: Math.round(f * width) };
+}
+
+const CARD_ROWS = 4; // node/meta, query, final+bar, connector
+const ACCENTS = ["#7aa2f7", "#bb9af7", "#7dcfff", "#9ece6a", "#e0af68", "#f7768e"];
+
+function SessionOverview({
+  infos,
+  pending,
+  savedCounts,
+  sessionName,
+  selected,
+  revealed,
+  width,
+  height,
+}: {
+  infos: QueryInfo[];
+  pending: string | null;
+  savedCounts: { vars: number; fns: number; dropped: number };
+  sessionName: string;
+  selected: number;
+  revealed: number;
+  width: number;
+  height: number;
+}) {
+  const maxTokens = Math.max(1, ...infos.map((q) => q.usage.total_tokens));
+  const maxCost = Math.max(1e-9, ...infos.map((q) => q.usage.cost));
+  const totalTokens = infos.reduce((n, q) => n + q.usage.total_tokens, 0);
+  const totalCost = infos.reduce((n, q) => n + q.usage.cost, 0);
+
+  const bannerHeight = 5;
+  const listHeight = Math.max(3, height - bannerHeight - 1);
+  const innerW = width - 4;
+  const listInner = listHeight - 2;
+  // Reserve a row for the scroll indicator when not every card fits, so the
+  // rendered card-rows never exceed listInner (overflow squashes the top card).
+  const maxCards = Math.max(1, Math.floor(listInner / CARD_ROWS));
+  const needsScroll = infos.length > maxCards;
+  const visibleCards = needsScroll ? Math.max(1, Math.floor((listInner - 1) / CARD_ROWS)) : maxCards;
+  const scrollOffset = Math.max(0, Math.min(selected - Math.floor(visibleCards / 2), infos.length - visibleCards));
+  const start = Math.max(0, scrollOffset);
+  const end = Math.min(infos.length, start + visibleCards);
+
+  const barW = 12;
+  const metaCol = 26; // right-aligned steps/tok/cost block width
+
+  return (
+    <box flexDirection="column" width={width} height={height} backgroundColor="#0b0b14">
+      {/* Banner */}
+      <box flexDirection="row" height={bannerHeight} paddingLeft={1} alignItems="center">
+        <ascii-font text="FAST RLM" font="tiny" color="#7aa2f7" />
+        <box flexDirection="column" paddingLeft={2} justifyContent="center">
+          <text>
+            <span fg="#c0caf5"><strong>{truncate(sessionName, 40)}</strong></span>
+          </text>
+          <text>
+            <span fg="#7dcfff">{infos.length}</span><span fg="#565f89"> queries   </span>
+            <span fg="#9ece6a">{formatTokens(totalTokens)}</span><span fg="#565f89"> tok   </span>
+            <span fg="#e0af68">${totalCost.toFixed(4)}</span>
+          </text>
+          <text>
+            <span fg="#565f89">saved  </span>
+            <span fg="#bb9af7">{savedCounts.vars}</span><span fg="#565f89"> vars  </span>
+            <span fg="#bb9af7">{savedCounts.fns}</span><span fg="#565f89"> fns  </span>
+            <span fg={savedCounts.dropped > 0 ? "#f7768e" : "#565f89"}>{savedCounts.dropped}</span><span fg="#565f89"> dropped</span>
+            {pending ? <span fg="#e0af68">   ● 1 pending</span> : null}
+          </text>
+        </box>
+      </box>
+
+      {/* Query timeline */}
+      <box
+        border
+        borderStyle="rounded"
+        borderColor="#3b4261"
+        title="  QUERY TIMELINE  "
+        titleAlignment="center"
+        flexDirection="column"
+        width={width}
+        height={listHeight}
+        overflow="hidden"
+        paddingLeft={1}
+      >
+        {infos.slice(start, end).map((info, vi) => {
+          const idx = start + vi;
+          if (idx >= revealed) {
+            return <box key={`ph-${idx}`} height={CARD_ROWS} />;
+          }
+          const isSel = idx === selected;
+          const accent = ACCENTS[idx % ACCENTS.length]!;
+          const node = isSel ? "◉" : info.linked ? "●" : "○";
+          const spine = idx === infos.length - 1 && !pending ? " " : "│";
+          const tokFrac = info.usage.total_tokens / maxTokens;
+          const { filled } = bar(tokFrac, barW);
+          const heat = heatColor(info.usage.cost, maxCost);
+          const label = `Q${idx + 1}`;
+          const meta = info.linked
+            ? `${info.steps} st · ${formatTokens(info.usage.total_tokens)} · $${info.usage.cost.toFixed(4)}`
+            : `${info.steps} st · unlinked`;
+          const queryLine = truncate(info.meta.query.replace(/\s+/g, " ").trim(), innerW - 6);
+          // Collapse whitespace: a long-form (multi-line) FINAL would otherwise
+          // inject newlines and blow past the card's fixed row height.
+          const finalLine = truncate(finalToStr(info.meta.final).replace(/\s+/g, " ").trim(), innerW - 6 - barW - 4);
+
+          return (
+            <box key={`card-${idx}`} flexDirection="column" height={CARD_ROWS}>
+              {/* line 1: node + label + right meta */}
+              <text>
+                <span fg={accent}>{node} </span>
+                <span fg={isSel ? "#000000" : accent} bg={isSel ? accent : undefined}><strong>{` ${label} `}</strong></span>
+                <span fg="#565f89">{" ".repeat(Math.max(1, innerW - 4 - label.length - metaCol))}</span>
+                <span fg="#565f89">{meta}</span>
+              </text>
+              {/* line 2: query */}
+              <text>
+                <span fg={accent}>{spine}   </span>
+                <span fg={isSel ? "#c0caf5" : "#7f88b3"}>{queryLine}</span>
+              </text>
+              {/* line 3: final + token bar */}
+              <text>
+                <span fg={accent}>{spine}   </span>
+                <span fg="#565f89">→ </span>
+                <span fg={isSel ? "#9ece6a" : "#6a8f52"}><strong>{finalLine}</strong></span>
+                <span fg="#565f89">{"  "}</span>
+                <span fg={heat}>{"█".repeat(filled)}</span>
+                <span fg="#2a2e42">{"░".repeat(barW - filled)}</span>
+              </text>
+              {/* line 4: connector */}
+              <text><span fg={accent}>{spine}</span></text>
+            </box>
+          );
+        })}
+        {pending && end >= infos.length && revealed >= infos.length && (
+          <box flexDirection="column" height={CARD_ROWS}>
+            <text><span fg="#e0af68">○  </span><span fg="#e0af68"><strong> pending </strong></span></text>
+            <text><span fg="#3b4261">    </span><span fg="#6a5a3a">{truncate(pending.replace(/\s+/g, " ").trim(), innerW - 6)}</span></text>
+            <text><span fg="#6a5a3a">    (interrupted before FINAL)</span></text>
+            <text> </text>
+          </box>
+        )}
+        {needsScroll && (
+          <text fg="#565f89"> ↕ Q{start + 1}–Q{end} of {infos.length}</text>
+        )}
+      </box>
+
+      {/* Help */}
+      <box width={width} paddingLeft={1}>
+        <text fg="#565f89">
+          <span fg="#7aa2f7">↑↓</span>:select  <span fg="#7aa2f7">Enter/→</span>:open run  <span fg="#7aa2f7">m</span>:memory  <span fg="#7aa2f7">q</span>:quit
+        </text>
+      </box>
+    </box>
+  );
+}
+
+interface SessionVarMeta {
+  type?: string;
+  preview?: string;
+  comment?: string | null;
+  note?: string | null;
+  committed?: boolean;
+}
+
+type MemKind = "var" | "fn" | "dropped";
+interface MemEntry {
+  kind: MemKind;
+  name: string;
+  meta?: SessionVarMeta; // var
+  source?: string;       // fn
+  reason?: string;       // dropped
+}
+
+// Flatten the saved memory into one ordered, selectable list. Curated first:
+// committed vars, then commented vars, then bare vars; then functions; then
+// dropped names.
+export function buildMemoryEntries(
+  variables: Record<string, SessionVarMeta>,
+  functions: Record<string, string>,
+  dropped: Record<string, string>,
+): MemEntry[] {
+  const rank = (m: SessionVarMeta) => (m.committed ? 0 : m.comment ? 1 : 2);
+  const varNames = Object.keys(variables).sort((a, b) => {
+    const d = rank(variables[a] ?? {}) - rank(variables[b] ?? {});
+    return d !== 0 ? d : a.localeCompare(b);
+  });
+  const entries: MemEntry[] = [];
+  for (const name of varNames) entries.push({ kind: "var", name, meta: variables[name] });
+  for (const name of Object.keys(functions)) entries.push({ kind: "fn", name, source: functions[name] });
+  for (const name of Object.keys(dropped)) entries.push({ kind: "dropped", name, reason: dropped[name] });
+  return entries;
+}
+
+// The saved-REPL-memory inspector: a master list (left) + an expanded detail
+// pane (right) that shows the selected entry's full value preview, comment/note,
+// or syntax-highlighted function source, scrollable independently.
+export function MemoryView({
+  entries,
+  counts,
+  selected,
+  detailScroll,
+  width,
+  height,
+}: {
+  entries: MemEntry[];
+  counts: { vars: number; fns: number; dropped: number };
+  selected: number;
+  detailScroll: number;
+  width: number;
+  height: number;
+}) {
+  const listW = Math.max(22, Math.min(40, Math.floor(width * 0.34)));
+  const detailW = width - listW;
+
+  // ── Left: selectable list, windowed around the selection ──
+  const listInner = height - 2;
+  // Reserve a row for the count indicator when scrolling (rendering listInner
+  // rows PLUS an indicator overflows the box and squashes the top row).
+  const listScrolls = entries.length > listInner;
+  const listShown = listScrolls ? listInner - 1 : listInner;
+  const listStart = Math.max(0, Math.min(selected - Math.floor(listShown / 2), Math.max(0, entries.length - listShown)));
+  const listVisible = entries.slice(listStart, listStart + listShown);
+  const iconFor = (e: MemEntry) =>
+    e.kind === "fn" ? "ƒ" : e.kind === "dropped" ? "✕" : e.meta?.committed ? "★" : "•";
+  const colorFor = (e: MemEntry) =>
+    e.kind === "fn" ? "#9ece6a" : e.kind === "dropped" ? "#f7768e" : e.meta?.committed ? "#bb9af7" : "#c0caf5";
+
+  const listBox = (
+    <box
+      border
+      borderStyle="rounded"
+      borderColor="#3b4261"
+      title={`  MEMORY · ${counts.vars}v ${counts.fns}ƒ ${counts.dropped}✕  `}
+      titleAlignment="center"
+      flexDirection="column"
+      width={listW}
+      height={height}
+      overflow="hidden"
+      backgroundColor="#0b0b14"
+    >
+      {listVisible.map((e, vi) => {
+        const idx = listStart + vi;
+        const sel = idx === selected;
+        const c = colorFor(e);
+        const suffix = e.kind === "var" ? ` (${e.meta?.type ?? "?"})` : "";
+        return (
+          <text key={`li-${idx}`} bg={sel ? c : undefined}>
+            <span fg={sel ? "#0b0b14" : c}>{sel ? "▸ " : "  "}{iconFor(e)} </span>
+            <span fg={sel ? "#0b0b14" : "#c0caf5"}>{truncate(e.name, listW - 8)}</span>
+            <span fg={sel ? "#0b0b14" : "#565f89"}>{suffix}</span>
+          </text>
+        );
+      })}
+      {listScrolls && (
+        <text fg="#565f89"> {listStart + 1}-{Math.min(listStart + listShown, entries.length)}/{entries.length}</text>
+      )}
+    </box>
+  );
+
+  // ── Right: expanded detail of the selected entry ──
+  const detailInnerW = detailW - 4;
+  const cur = entries[selected];
+  const lines: React.ReactNode[] = [];
+  const wrap = (s: string) => wrapText(s.replace(/\r/g, ""), detailInnerW);
+
+  if (!cur) {
+    lines.push(<text key="empty"><span fg="#565f89">(no saved memory)</span></text>);
+  } else if (cur.kind === "var") {
+    const m = cur.meta ?? {};
+    lines.push(
+      <text key="h">
+        <span fg="#c0caf5"><strong>{cur.name}</strong></span>
+        <span fg="#565f89"> : {m.type ?? "?"}</span>
+        {m.committed ? <span fg="#bb9af7">  ★ committed</span> : null}
+      </text>,
+    );
+    if (m.note) for (const [i, l] of wrap(`★ note: ${m.note}`).entries()) lines.push(<text key={`n${i}`}><span fg="#bb9af7">{l}</span></text>);
+    if (m.comment) for (const [i, l] of wrap(`# ${m.comment}`).entries()) lines.push(<text key={`c${i}`}><span fg="#6272a4">{l}</span></text>);
+    lines.push(<text key="vg"> </text>);
+    lines.push(<text key="vl"><span fg="#565f89">value:</span></text>);
+    for (const [i, l] of wrap(m.preview ?? "(no preview)").entries()) lines.push(<text key={`p${i}`}><span fg="#e2e2e2">{l || " "}</span></text>);
+  } else if (cur.kind === "fn") {
+    lines.push(<text key="h"><span fg="#9ece6a"><strong>ƒ {cur.name}</strong></span><span fg="#565f89">  (restored as source)</span></text>);
+    lines.push(<text key="g"> </text>);
+    for (const [i, raw] of (cur.source ?? "").split("\n").entries()) {
+      for (const [j, l] of wrap(raw).entries()) lines.push(<HighlightedCodeLine key={`s${i}-${j}`} line={l || " "} />);
+    }
+  } else {
+    lines.push(<text key="h"><span fg="#f7768e"><strong>✕ {cur.name}</strong></span><span fg="#565f89">  (could not be saved)</span></text>);
+    lines.push(<text key="g"> </text>);
+    for (const [i, l] of wrap(cur.reason ?? "").entries()) lines.push(<text key={`r${i}`}><span fg="#f7768e">{l}</span></text>);
+  }
+
+  const detailInner = height - 2;
+  const detailOverflow = lines.length > detailInner;
+  const detailVisible = lines.slice(detailScroll, detailScroll + detailInner - (detailOverflow ? 1 : 0));
+
+  const detailBox = (
+    <box
+      border
+      borderStyle="rounded"
+      borderColor="#bb9af7"
+      title={cur ? `  ${truncate(cur.name, detailW - 12)}  ` : "  DETAIL  "}
+      titleAlignment="center"
+      flexDirection="column"
+      width={detailW}
+      height={height}
+      overflow="hidden"
+      paddingLeft={1}
+      backgroundColor="#0b0b14"
+    >
+      {detailVisible}
+      {detailOverflow && (
+        <text fg="#565f89"> ↕ {detailScroll + 1}-{detailScroll + detailVisible.length}/{lines.length}  (J/K)</text>
+      )}
+    </box>
+  );
+
+  return (
+    <box flexDirection="row" width={width} height={height}>
+      {listBox}
+      {detailBox}
+    </box>
+  );
+}
+
+export function SessionApp({
+  infos,
+  pending,
+  savedCounts,
+  sessionName,
+  variables,
+  functions,
+  dropped,
+}: {
+  infos: QueryInfo[];
+  pending: string | null;
+  savedCounts: { vars: number; fns: number; dropped: number };
+  sessionName: string;
+  variables: Record<string, SessionVarMeta>;
+  functions: Record<string, string>;
+  dropped: Record<string, string>;
+}) {
+  const renderer = useRenderer();
+  const { width, height } = useTerminalDimensions();
+  const [mode, setMode] = useState<"overview" | "detail">("overview");
+  const [selected, setSelected] = useState(0);
+  const [revealed, setRevealed] = useState(infos.length <= 1 ? infos.length : 0);
+  const [showMemory, setShowMemory] = useState(false);
+  const [memSelected, setMemSelected] = useState(0);
+  const [memDetailScroll, setMemDetailScroll] = useState(0);
+  const memEntries = useMemo(() => buildMemoryEntries(variables, functions, dropped), [variables, functions, dropped]);
+
+  // Staggered entrance: reveal query cards one after another.
+  const timeline = useTimeline({ duration: Math.max(1, infos.length) * 130 });
+  useEffect(() => {
+    if (infos.length <= 1) return;
+    const target = { n: 0 };
+    timeline.add(target, {
+      n: infos.length,
+      duration: Math.max(1, infos.length) * 130,
+      ease: "outQuad",
+      onUpdate: (anim: { targets: { n: number }[] }) => {
+        setRevealed(Math.min(infos.length, Math.ceil(anim.targets[0]!.n)));
+      },
+    });
+  }, []);
+
+  const linkedIndex = useCallback((from: number, dir: 1 | -1): number => {
+    for (let i = from + dir; i >= 0 && i < infos.length; i += dir) {
+      if (infos[i]!.linked) return i;
+    }
+    return from;
+  }, [infos]);
+
+  useKeyboard(
+    useCallback((key) => {
+      if (mode === "detail") return; // RunView handles its own keys
+      if (key.name === "q" || (key.ctrl && key.name === "c")) { renderer.destroy(); return; }
+      // Memory inspector overlay: ↑↓ select an entry, J/K scroll its detail.
+      if (key.name === "m") { setShowMemory((v) => !v); setMemSelected(0); setMemDetailScroll(0); return; }
+      if (showMemory) {
+        if (key.name === "escape") { setShowMemory(false); return; }
+        if (key.name === "up") { setMemSelected((s) => Math.max(0, s - 1)); setMemDetailScroll(0); return; }
+        if (key.name === "down") { setMemSelected((s) => Math.min(memEntries.length - 1, s + 1)); setMemDetailScroll(0); return; }
+        if (key.name === "k" || key.name === "pageup") { setMemDetailScroll((s) => Math.max(0, s - 5)); return; }
+        if (key.name === "j" || key.name === "pagedown") { setMemDetailScroll((s) => s + 5); return; }
+        return; // trap other keys while memory is open
+      }
+      if (key.name === "up") { setSelected((s) => Math.max(0, s - 1)); return; }
+      if (key.name === "down") { setSelected((s) => Math.min(infos.length - 1, s + 1)); return; }
+      if (key.name === "return" || key.name === "right") {
+        if (infos[selected]?.linked) setMode("detail");
+        return;
+      }
+    }, [mode, selected, infos, renderer, showMemory, memEntries]),
+  );
+
+  if (mode === "detail" && infos[selected]?.linked && infos[selected]!.logData) {
+    const info = infos[selected]!;
+    const ctx: SessionCtx = {
+      index: selected,
+      total: infos.length,
+      queryText: info.meta.query.replace(/\s+/g, " ").trim(),
+      onBack: () => setMode("overview"),
+      onPrev: () => setSelected((s) => linkedIndex(s, -1)),
+      onNext: () => setSelected((s) => linkedIndex(s, 1)),
+    };
+    return <App key={selected} logData={info.logData!} sessionCtx={ctx} />;
+  }
+
+  if (showMemory) {
+    return (
+      <box flexDirection="column" width={width} height={height}>
+        <MemoryView
+          entries={memEntries}
+          counts={savedCounts}
+          selected={Math.min(memSelected, Math.max(0, memEntries.length - 1))}
+          detailScroll={memDetailScroll}
+          width={width}
+          height={height - 1}
+        />
+        <box width={width} paddingLeft={1}>
+          <text fg="#565f89"><span fg="#7aa2f7">↑↓</span>:select  <span fg="#7aa2f7">J/K</span>:scroll detail  <span fg="#7aa2f7">m/Esc</span>:back  <span fg="#7aa2f7">q</span>:quit</text>
+        </box>
+      </box>
+    );
+  }
+
+  return (
+    <SessionOverview
+      infos={infos}
+      pending={pending}
+      savedCounts={savedCounts}
+      sessionName={sessionName}
+      selected={selected}
+      revealed={revealed}
+      width={width}
+      height={height}
+    />
+  );
+}
+
 // ── Entry Point ──────────────────────────────────────────────────────
 
-const logPath = process.argv[2];
+async function main() {
+const inputPath = process.argv[2];
 
-if (!logPath) {
-  console.error("Usage: bun run src/index.tsx <path-to-log.jsonl>");
+if (!inputPath) {
+  console.error("Usage: bun run src/index.tsx <log.jsonl | session-dir | state.json>");
   process.exit(1);
 }
 
-const resolvedPath = resolve(logPath);
-let fileContent: string;
+const resolvedPath = resolve(inputPath);
+
+// Session mode when pointed at a state.json (or a dir containing one).
+let sessionStateFile: string | null = null;
 try {
-  fileContent = readFileSync(resolvedPath, "utf-8");
-} catch (err) {
-  console.error(`Failed to read file: ${resolvedPath}`);
-  process.exit(1);
-}
-
-const logData = parseLogFile(fileContent);
-
-if (logData.rootRuns.length === 0) {
-  console.error("No log entries found in file.");
+  const st = statSync(resolvedPath);
+  if (st.isDirectory()) {
+    const cand = joinPath(resolvedPath, "state.json");
+    if (existsSync(cand)) sessionStateFile = cand;
+  } else if (basename(resolvedPath) === "state.json") {
+    sessionStateFile = resolvedPath;
+  }
+} catch {
+  console.error(`Failed to read: ${resolvedPath}`);
   process.exit(1);
 }
 
 const renderer = await createCliRenderer({ exitOnCtrlC: false });
-createRoot(renderer).render(<App logData={logData} />);
+
+if (sessionStateFile) {
+  let state: SessionStateFile;
+  try {
+    state = JSON.parse(readFileSync(sessionStateFile, "utf-8")) as SessionStateFile;
+  } catch {
+    console.error(`Failed to parse session state: ${sessionStateFile}`);
+    process.exit(1);
+  }
+  if (!state.queries || state.queries.length === 0) {
+    console.error("Session has no completed queries yet.");
+    process.exit(1);
+  }
+  const infos = buildQueryInfos(state);
+  const savedCounts = {
+    vars: Object.keys(state.variables ?? {}).length,
+    fns: Object.keys(state.functions ?? {}).length,
+    dropped: Object.keys(state.dropped ?? {}).length,
+  };
+  const sessionName = basename(dirname(sessionStateFile)) || sessionStateFile;
+  createRoot(renderer).render(
+    <SessionApp
+      infos={infos}
+      pending={state.pending_query ?? null}
+      savedCounts={savedCounts}
+      sessionName={sessionName}
+      variables={(state.variables ?? {}) as Record<string, SessionVarMeta>}
+      functions={(state.functions ?? {}) as Record<string, string>}
+      dropped={(state.dropped ?? {}) as Record<string, string>}
+    />,
+  );
+} else {
+  let fileContent: string;
+  try {
+    fileContent = readFileSync(resolvedPath, "utf-8");
+  } catch {
+    console.error(`Failed to read file: ${resolvedPath}`);
+    process.exit(1);
+  }
+  const logData = parseLogFile(fileContent);
+  if (logData.rootRuns.length === 0) {
+    console.error("No log entries found in file.");
+    process.exit(1);
+  }
+  createRoot(renderer).render(<App logData={logData} />);
+}
+}
+
+if (import.meta.main) {
+  await main();
+}

@@ -1040,6 +1040,8 @@ Output:\n${stdoutBuffer.trim()}
                     sessionState.queries.push({
                         query: sessionState.pending_query ?? "",
                         final: finalForState,
+                        log_file: getLogFile(),
+                        run_id: logger.run_id,
                     });
                     sessionState.pending_query = null;
                     await persistSession!(sessionState);

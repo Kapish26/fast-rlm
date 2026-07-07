@@ -96,6 +96,21 @@ session.clear()      # delete state; next query starts fresh
 
 `variables()` never exposes the pickled bytes — values are only unpickled inside the REPL on resume.
 
+## Viewing a session
+
+`fast-rlm-log` shows a session's query timeline across all its runs — point it at the session directory (or its `state.json`):
+
+```
+fast-rlm-log runs/podcasts            # text summary (--stats, default)
+fast-rlm-log runs/podcasts --tui      # interactive session timeline
+```
+
+**`--stats`** prints each completed query, its `FINAL`, and — for runs recorded since session log-linking — that run's step count, tokens, and cost pulled from its `.jsonl` transcript, plus a session-wide total.
+
+**`--tui`** opens an interactive session view (requires `bun`): an animated query timeline with per-query token/cost bars. Select a query with `↑↓` and press `Enter` to drill into that run's full step-by-step transcript (code, output, `I` for the user input, `R` reasoning, `O` final output, sub-agents, timeline); `[` / `]` move between queries and `Esc` returns to the session overview. Press `m` for the **session memory** inspector — a master-detail view of the state a resumed query inherits: a selectable list of saved variables (committed ones first, `★`), functions, and dropped names on the left; `↑↓` selects an entry and the right pane expands its full content — the variable's value preview with its comment/note, or the function's syntax-highlighted source — scrollable with `J/K`.
+
+Sessions created before log-linking won't have the run links — they show `(not linked)` in `--stats` and can't be drilled into, but their state still loads and resumes normally.
+
 ## Scope and guarantees
 
 - **Root agent only.** Sub-agents never see or contribute session state; they stay fresh and isolated.

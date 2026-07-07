@@ -283,6 +283,7 @@ Behavior and limits:
 - **Showing earlier code makes follow-ups faster.** By default the resumed agent sees the code it ran before (`add_session_code_to_context=True`, CLI `--no-session-code` to disable). In our experiments this made multi-query sessions markedly cheaper — the agent reuses *how* it built things instead of re-exploring the restored state each time — while staying just as accurate. Turn it off only when minimizing the resume prompt matters more than speed.
 - **`context` is not saved** (it holds each query anew). The agent has a `commit(name, note="...")` function to annotate a variable or force-save skipped names like `context`.
 - **Sub-agents are unaffected** — they stay fresh and isolated; only the root agent's state persists.
+- **Inspect a whole session** with `fast-rlm-log <session-dir>` — the query→FINAL timeline across every run, with per-query tokens/cost. Add `--tui` for an interactive session timeline: select a query and drill into its full step-by-step run transcript (`[`/`]` to move between queries, `Esc` back to the overview).
 
 ## Custom instructions
 

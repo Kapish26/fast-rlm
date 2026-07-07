@@ -31,9 +31,23 @@ export interface SessionCodeEntry {
     code: string;
 }
 
+// Bumped to 2 when queries[] gained log_file/run_id (the link to each query's
+// run transcript). v1 states still load — they just lack those fields.
+export const SESSION_STATE_VERSION = 2;
+
+export interface SessionQuery {
+    query: string;
+    final: unknown;
+    // Link to the run that produced this answer, for session-level log viewing.
+    // Absent on states written before v2. `log_file` is the run's .jsonl path
+    // as returned by the engine; `run_id` is that run's root run id.
+    log_file?: string | null;
+    run_id?: string | null;
+}
+
 export interface SessionState {
     version: number;
-    queries: { query: string; final: unknown }[];
+    queries: SessionQuery[];
     pending_query: string | null; // set while a query runs; moved into queries at FINAL
     code_log: SessionCodeEntry[];
     variables: Record<string, SessionVariable>;
@@ -43,7 +57,7 @@ export interface SessionState {
 
 export function emptySessionState(): SessionState {
     return {
-        version: 1,
+        version: SESSION_STATE_VERSION,
         queries: [],
         pending_query: null,
         code_log: [],
@@ -57,8 +71,13 @@ export function loadSessionState(path: string): SessionState | null {
     try {
         const raw = Deno.readTextFileSync(path);
         const st = JSON.parse(raw) as SessionState;
-        if (typeof st !== "object" || st === null || st.version !== 1) return null;
-        return { ...emptySessionState(), ...st };
+        // Accept any version we know how to read (1..CURRENT); newer files from
+        // a future build are refused rather than silently mis-parsed.
+        if (typeof st !== "object" || st === null) return null;
+        if (!(st.version >= 1 && st.version <= SESSION_STATE_VERSION)) return null;
+        // Migrate in memory: fill missing fields, stamp the current version so
+        // the next write persists in the new format.
+        return { ...emptySessionState(), ...st, version: SESSION_STATE_VERSION };
     } catch {
         return null; // missing or corrupt -> start fresh
     }
@@ -293,9 +312,12 @@ def __session_sweep__(step_code=None):
         if len(blob) > __SESSION_MAX_VAR_BYTES__:
             dropped[name] = f"too large to save: {len(blob)} bytes (cap {__SESSION_MAX_VAR_BYTES__})"
             continue
+        # A generous preview so host-side inspectors (the session viewer) can
+        # show real content, not just a stub. The live value the agent inherits
+        # on resume is the full unpickled object, not this string.
         preview = repr(val)
-        if len(preview) > 200:
-            preview = preview[:200] + "...[truncated]"
+        if len(preview) > 2000:
+            preview = preview[:2000] + f"...[truncated, {len(preview)} chars total]"
         out_vars[name] = {
             "pickle_b64": __ss_b64.b64encode(blob).decode(),
             "type": type(val).__name__,

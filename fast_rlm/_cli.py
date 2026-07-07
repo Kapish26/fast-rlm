@@ -7,7 +7,76 @@ import sys
 
 from fast_rlm._runner import _find_engine_dir
 
-USAGE = "Usage: fast-rlm-log <log-file.jsonl> [--stats|--tui]"
+USAGE = (
+    "Usage: fast-rlm-log <log-file.jsonl> [--stats|--tui]\n"
+    "       fast-rlm-log <session-dir | state.json> [--stats]   "
+    "(session: query timeline across runs)"
+)
+
+
+def _run_totals(log_path: str) -> dict:
+    """Tokens/cost/steps for one run's .jsonl (best-effort; {} if unreadable)."""
+    try:
+        with open(log_path) as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+    except (OSError, json.JSONDecodeError):
+        return {}
+    tokens = cost = steps = 0
+    for e in entries:
+        if e.get("event_type") in ("execution_result", "code_generated"):
+            steps += 1
+        u = e.get("usage")
+        if u:
+            tokens += u.get("total_tokens", 0)
+            cost += u.get("cost", 0) or 0
+    return {"tokens": tokens, "cost": cost, "steps": steps}
+
+
+def _truncate(s: str, n: int = 120) -> str:
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _print_session(state_file: str):
+    """Render a whole session: the query→FINAL timeline across its runs, with
+    per-query token/cost totals pulled from each run's linked .jsonl log."""
+    with open(state_file) as f:
+        st = json.load(f)
+    session_dir = os.path.dirname(state_file)
+    queries = st.get("queries", [])
+
+    print(f"Session:  {session_dir}")
+    print(f"State:    {state_file}  (v{st.get('version', '?')})")
+    print(f"Queries:  {len(queries)} completed"
+          + ("  (+1 pending/interrupted)" if st.get("pending_query") else ""))
+    print(f"Saved:    {len(st.get('variables', {}))} variable(s), "
+          f"{len(st.get('functions', {}))} function(s), "
+          f"{len(st.get('dropped', {}))} dropped")
+    print()
+
+    grand_tokens = 0
+    grand_cost = 0.0
+    for i, q in enumerate(queries, 1):
+        print(f"[{i}] {_truncate(q.get('query', ''))}")
+        print(f"    FINAL: {_truncate(q.get('final'))}")
+        log_file = q.get("log_file")
+        if log_file and os.path.exists(log_file):
+            t = _run_totals(log_file)
+            if t:
+                grand_tokens += t["tokens"]
+                grand_cost += t["cost"]
+                print(f"    run:   {t['steps']} step(s), {t['tokens']:,} tokens, "
+                      f"${t['cost']:.6f}")
+            print(f"    log:   {log_file}   "
+                  f"(view: fast-rlm-log {log_file} --tui)")
+        elif log_file:
+            print(f"    log:   {log_file}  (missing — rotated or moved)")
+        else:
+            print("    log:   (not linked — run predates session log linking)")
+        print()
+
+    print(f"Session total: {grand_tokens:,} tokens, ${grand_cost:.6f} "
+          f"across {len(queries)} run(s)")
 
 
 def main():
@@ -166,44 +235,73 @@ def view_log():
         print(USAGE)
         sys.exit(1)
 
-    log_path = os.path.abspath(args[0])
-    if not os.path.exists(log_path):
-        print(f"Error: file not found: {log_path}", file=sys.stderr)
+    target = os.path.abspath(args[0])
+    if not os.path.exists(target):
+        print(f"Error: not found: {target}", file=sys.stderr)
         sys.exit(1)
 
     mode = args[1] if len(args) > 1 else "--stats"
+
+    # Session mode: a directory holding state.json, or a state.json file itself.
+    state_file = None
+    if os.path.isdir(target):
+        cand = os.path.join(target, "state.json")
+        if os.path.exists(cand):
+            state_file = cand
+        else:
+            print(f"Error: no state.json in {target} (not a session directory).",
+                  file=sys.stderr)
+            sys.exit(1)
+    elif os.path.basename(target) == "state.json":
+        state_file = target
+
+    if state_file:
+        if mode == "--tui":
+            _launch_tui(state_file)  # session timeline; drill into any query's run
+            return
+        _print_session(state_file)
+        return
+
+    log_path = target
 
     if mode == "--stats":
         _print_stats(log_path)
         return
 
     if mode == "--tui":
-        if shutil.which("bun") is None:
-            if os.name == "nt":
-                msg = (
-                    "Error: bun is required for the TUI log viewer but was not found on PATH.\n"
-                    "Install it with:\n"
-                    "  powershell -c \"irm bun.sh/install.ps1 | iex\"\n"
-                    "  or: npm install -g bun"
-                )
-            else:
-                msg = (
-                    "Error: bun is required for the TUI log viewer but was not found on PATH.\n"
-                    "Install it with: curl -fsSL https://bun.sh/install | bash"
-                )
-            print(msg, file=sys.stderr)
-            sys.exit(1)
-
-        engine_dir = _find_engine_dir()
-        tui_dir = engine_dir / "tui_log_viewer"
-
-        if not (tui_dir / "node_modules").exists():
-            print("Installing log viewer dependencies...")
-            subprocess.run(["bun", "install"], cwd=str(tui_dir), check=True)
-
-        cmd = ["bun", "run", "src/index.tsx", log_path]
-        sys.exit(subprocess.run(cmd, cwd=str(tui_dir)).returncode)
+        _launch_tui(log_path)
+        return
 
     print(f"Unknown flag: {mode}")
     print(USAGE)
     sys.exit(1)
+
+
+def _launch_tui(path: str):
+    """Launch the OpenTUI viewer (bun). Accepts a single run's .jsonl or a
+    session's state.json — the viewer picks session vs single-run by the path."""
+    if shutil.which("bun") is None:
+        if os.name == "nt":
+            msg = (
+                "Error: bun is required for the TUI log viewer but was not found on PATH.\n"
+                "Install it with:\n"
+                "  powershell -c \"irm bun.sh/install.ps1 | iex\"\n"
+                "  or: npm install -g bun"
+            )
+        else:
+            msg = (
+                "Error: bun is required for the TUI log viewer but was not found on PATH.\n"
+                "Install it with: curl -fsSL https://bun.sh/install | bash"
+            )
+        print(msg, file=sys.stderr)
+        sys.exit(1)
+
+    engine_dir = _find_engine_dir()
+    tui_dir = engine_dir / "tui_log_viewer"
+
+    if not (tui_dir / "node_modules").exists():
+        print("Installing log viewer dependencies...")
+        subprocess.run(["bun", "install"], cwd=str(tui_dir), check=True)
+
+    cmd = ["bun", "run", "src/index.tsx", path]
+    sys.exit(subprocess.run(cmd, cwd=str(tui_dir)).returncode)
