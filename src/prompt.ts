@@ -391,6 +391,13 @@ export interface PromptOptions {
     enableTools?: boolean; // default true
     enableStructuredIo?: boolean; // default true
     enableCompressionGuard?: boolean; // default true (root prompt only)
+    // Capability inheritance (default false). These do not add or remove prompt
+    // sections; they flip the two sentences that tell the agent whether a child
+    // gets its tools / MCP servers automatically. An agent told the wrong rule
+    // either hands a child a path it cannot resolve or re-passes what it already
+    // has, so these must track the runtime behaviour exactly.
+    inheritTools?: boolean;
+    inheritMcp?: boolean;
     instruction?: string | null; // optional caller directive appended at the end
 }
 
@@ -403,11 +410,26 @@ function removeBetween(text: string, startMarker: string, endMarker: string): st
     return text.slice(0, s) + text.slice(e);
 }
 
+// The two delegation-inheritance sentences in SYSTEM_PROMPT, and what they
+// become when the corresponding inherit_* config flag is on. Leaf agents cannot
+// call llm_query, so these only ever appear in the root prompt.
+const TOOLS_NO_INHERIT =
+    "- Sub-agents do NOT automatically inherit your tools. If you want a child to have a tool, you MUST pass it explicitly via `tools=[...]`. This applies both to tools pre-loaded into your REPL and to tools you define yourself.";
+const TOOLS_INHERIT =
+    "- Sub-agents automatically inherit your tools — both those pre-loaded into your REPL and any you define yourself — so you do not need to re-pass them. Passing `tools=[...]` overrides that inherited set for one call, and `tools=[]` gives the child no tools at all.";
+const MCP_NO_INHERIT =
+    '- Sub-agents do NOT inherit MCP access. Grant a child specific servers by name: `await llm_query(task, mcp=["fsio"])`.';
+const MCP_INHERIT =
+    '- Sub-agents automatically inherit your MCP servers, so a child can call `mcp_call` without being granted anything. Pass `mcp=["fsio"]` to narrow it to specific servers for one call, or `mcp=[]` to give the child no MCP access at all.';
+
 export function buildSystemPrompt(isLeaf: boolean, opts: PromptOptions = {}): string {
     const enableTools = opts.enableTools !== false;
     const enableStructuredIo = opts.enableStructuredIo !== false;
     const enableCompressionGuard = opts.enableCompressionGuard !== false;
     let p = isLeaf ? LEAF_AGENT_SYSTEM_PROMPT : SYSTEM_PROMPT;
+
+    if (opts.inheritTools) p = p.replace(TOOLS_NO_INHERIT, TOOLS_INHERIT);
+    if (opts.inheritMcp) p = p.replace(MCP_NO_INHERIT, MCP_INHERIT);
 
     // Delegation/compression guidance lives only in the root (non-leaf) prompt,
     // since leaf agents can't call llm_query. Strip it when the guard is off.

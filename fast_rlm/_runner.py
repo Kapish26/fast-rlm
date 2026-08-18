@@ -188,6 +188,19 @@ class RLMConfig:
     #                             and dict/list inputs (shown to the agent as str)
     enable_tools: bool = True
     enable_structured_io: bool = True
+    # Capability inheritance for sub-agents (default False — a sub-agent starts
+    # with nothing its parent did not explicitly hand it):
+    #   inherit_tools -> a child spawned without `tools=` gets its parent's
+    #                    Python tools, and passes them down in turn
+    #   inherit_mcp   -> a child spawned without `mcp=` gets every MCP server
+    #                    its parent can reach, and passes them down in turn
+    # An explicit argument on the llm_query call always wins, including an empty
+    # list, which grants nothing. Inheritance can only narrow with depth: a child
+    # never gains access its parent did not have. Turning inherit_mcp on means
+    # sub-agents at every depth can call the same MCP tools as the root, so only
+    # enable it when every configured server is safe for them to reach.
+    inherit_tools: bool = False
+    inherit_mcp: bool = False
     # Compression guard: when an agent delegates a large, barely-compressed
     # context to a subagent, make it self-confirm (same model, same system
     # prompt) before the call runs; NO blocks and forces a compress + retry.
@@ -370,7 +383,9 @@ def run(
             config ``{"url": str, "headers": {str: str}}``. The root agent sees
             all configured servers and can call their tools inside the REPL via
             ``await mcp_call(server, tool, **kwargs)``. Sub-agents inherit none
-            by default — grant them per server via ``llm_query(..., mcp=[name])``.
+            by default — grant them per server via ``llm_query(..., mcp=[name])``,
+            or set ``config=RLMConfig(inherit_mcp=True)`` to have every sub-agent
+            inherit the servers its parent can reach.
             Configuring any stdio server grants the Deno host ``--allow-run``.
         tools: Optional list of Python callables exposed to the root agent.
             Each function's source is extracted via `inspect.getsource` and

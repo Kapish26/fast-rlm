@@ -104,6 +104,13 @@ const API_TIMEOUT_MS = _config.api_timeout_ms ?? 600000;
 const ENABLE_TOOLS = _config.enable_tools ?? true;
 const ENABLE_STRUCTURED_IO = _config.enable_structured_io ?? true;
 const ENABLE_COMPRESSION_GUARD = _config.enable_compression_guard ?? true;
+// Capability inheritance. Default false: a sub-agent starts with nothing its
+// parent did not explicitly hand it. When true, a child spawned without an
+// explicit `tools=` / `mcp=` argument inherits its parent's, and passes them
+// down to its own children in turn. An explicit argument on the llm_query call
+// always wins — including an empty list, which grants nothing.
+const INHERIT_TOOLS = _config.inherit_tools ?? false;
+const INHERIT_MCP = _config.inherit_mcp ?? false;
 const COMPRESSION_MIN_CHARS = _config.compression_min_chars ?? 5000;
 const COMPRESSION_RATIO = _config.compression_ratio ?? 0.6;
 // run(instruction=...) — applies to the ROOT agent only. Sub-agents are NOT given
@@ -220,6 +227,18 @@ await micropip.install(["requests", "httpx"])
         return val;
     };
 
+    // The MCP servers THIS agent can actually reach: every connected server for
+    // the root (mcpAllowedServers == null), otherwise the subset it was granted.
+    // This is the pool a child inherits under inherit_mcp, so a grant can only
+    // ever narrow as depth increases — a child never gains a server its parent
+    // was denied.
+    const currentMcpServers = (): string[] =>
+        !mcp
+            ? []
+            : mcpAllowedServers == null
+                ? mcp.serverNames
+                : mcpAllowedServers.filter((name) => mcp.serverNames.includes(name));
+
     const js_llm_query = async (
         context: unknown,
         child_schema?: unknown,
@@ -252,7 +271,9 @@ await micropip.install(["requests", "httpx"])
             }
             childSchema = s as JsonSchema;
         }
-        let childTools: string[] | null = null;
+        // Omitted `tools=` inherits this agent's own tool sources when
+        // inherit_tools is on; an explicit list (even an empty one) overrides.
+        let childTools: string[] | null = INHERIT_TOOLS ? (toolSources ?? null) : null;
         if (child_tool_sources != null && ENABLE_TOOLS) {
             const t = pyProxyToJs(child_tool_sources);
             if (!Array.isArray(t) || !t.every((x) => typeof x === "string")) {
@@ -262,9 +283,11 @@ await micropip.install(["requests", "httpx"])
             }
             childTools = t as string[];
         }
-        // Sub-agents inherit NO MCP servers unless the parent grants them by
-        // name (server-level). Default → [] (none).
-        let childMcpServers: string[] = [];
+        // Sub-agents inherit no MCP servers unless the parent grants them by
+        // name (server-level), or inherit_mcp is on — in which case an omitted
+        // `mcp=` hands the child every server this agent can currently reach.
+        // An explicit list (even an empty one) always overrides.
+        let childMcpServers: string[] = INHERIT_MCP ? [...currentMcpServers()] : [];
         if (child_mcp_servers != null) {
             const m = pyProxyToJs(child_mcp_servers);
             if (!Array.isArray(m) || !m.every((x) => typeof x === "string")) {
@@ -354,6 +377,8 @@ await micropip.install(["requests", "httpx"])
                 enableTools: ENABLE_TOOLS,
                 enableStructuredIo: ENABLE_STRUCTURED_IO,
                 enableCompressionGuard: ENABLE_COMPRESSION_GUARD,
+                inheritTools: INHERIT_TOOLS,
+                inheritMcp: INHERIT_MCP,
             },
             llmKwargs ?? null,
         );
@@ -365,11 +390,7 @@ await micropip.install(["requests", "httpx"])
 
     // ---- MCP bridge --------------------------------------------------------
     // Which servers this agent may see: null → all (root), else the granted set.
-    const allowedServers = mcp
-        ? (mcpAllowedServers == null
-            ? mcp.serverNames
-            : mcpAllowedServers.filter((s) => mcp.serverNames.includes(s)))
-        : [];
+    const allowedServers = currentMcpServers();
     const scopedTools = mcp ? mcp.tools.filter((t) => allowedServers.includes(t.server)) : [];
     const scopedResources = mcp ? mcp.resources.filter((r) => allowedServers.includes(r.server)) : [];
     const scopedTemplates = mcp ? mcp.resourceTemplates.filter((t) => allowedServers.includes(t.server)) : [];
@@ -495,8 +516,12 @@ class _LazyQuery:
         return self._run(False).__await__()
 
     async def _run(self, suppress):
+        # 'is not None', not truthiness: with inheritance enabled an explicitly
+        # empty list means "grant the child nothing", which is different from
+        # omitting the argument (inherit). Collapsing [] to None would silently
+        # turn a deliberate denial into a full grant.
         _tool_sources = None
-        if self.tools:
+        if self.tools is not None:
             import inspect as _inspect
             _tool_sources = []
             for _t in self.tools:
@@ -505,7 +530,7 @@ class _LazyQuery:
                     _tool_sources.append(_stashed)
                 else:
                     _tool_sources.append(_inspect.getsource(_t))
-        _mcp = list(self.mcp) if self.mcp else None
+        _mcp = list(self.mcp) if self.mcp is not None else None
         _result = await __js_llm_query__(self.context, self.schema, _tool_sources, _mcp, self.instruction, suppress)
         if hasattr(_result, "to_py"):
             return _result.to_py()
@@ -519,11 +544,13 @@ def llm_query(context, schema=None, *, tools=None, mcp=None, instruction=None):
         context: str or dict — the task/context for the sub-agent.
         schema: optional JSON Schema (as a dict) the sub-agent's FINAL must satisfy.
         tools: optional list of Python functions to expose in the sub-agent's REPL.
-            By default the sub-agent does NOT inherit your tools; pass them
-            explicitly here if you want the child to have access.
-        mcp: optional list of MCP server-name strings to grant the sub-agent.
-            By default the sub-agent inherits NO MCP servers; name the ones it
-            may use (e.g. mcp=["fsio"]) and it gets that server's tools/resources.
+            Unless this run enables inherit_tools, the sub-agent does NOT inherit
+            your tools; pass them explicitly here if you want the child to have
+            access. Passing an empty list always grants nothing.
+        mcp: optional list of MCP server-name strings to grant the sub-agent
+            (e.g. mcp=["fsio"]), which gives it that server's tools/resources.
+            Unless this run enables inherit_mcp, the sub-agent inherits NO MCP
+            servers. Passing an empty list always grants nothing.
         instruction: optional string directive shown ONLY to this sub-agent
             (appended to its system prompt). It is not inherited by the child's
             own sub-agents and does not carry over from you — pass it again on
@@ -830,6 +857,8 @@ Output:\n${stdoutBuffer.trim()}
         enableTools: ENABLE_TOOLS,
         enableStructuredIo: ENABLE_STRUCTURED_IO,
         enableCompressionGuard: ENABLE_COMPRESSION_GUARD,
+        inheritTools: INHERIT_TOOLS,
+        inheritMcp: INHERIT_MCP,
         instruction: instruction ?? null,
     };
     const apiOpts = { maxRetries: API_MAX_RETRIES, timeout: API_TIMEOUT_MS };

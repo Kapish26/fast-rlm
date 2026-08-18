@@ -11,6 +11,12 @@ api_timeout_ms: 30000
 # agent's REPL and strip it from the system prompt (applies to root + sub-agents).
 enable_tools: true
 enable_structured_io: true
+# Capability inheritance for sub-agents (default false). When true, a sub-agent
+# spawned without an explicit tools=/mcp= argument inherits its parent's Python
+# tools / MCP servers and passes them down in turn. An explicit argument on the
+# llm_query call always wins, including an empty list, which grants nothing.
+inherit_tools: false
+inherit_mcp: false
 # Compression guard: force a self-confirm before delegating a large,
 # barely-compressed context to a subagent (ablatable).
 enable_compression_guard: true

@@ -97,6 +97,9 @@ result = await llm_query(
 )
 ```
 
+This is the default. Set `RLMConfig(inherit_tools=True)` to have every sub-agent start with its parent's tools (and pass them down to its own children in turn). An explicit `tools=[...]` on a call still overrides the inherited set, and `tools=[]` gives the child nothing.
+
+
 This rule applies to user-registered tools *and* to functions the parent agent defined itself in its own REPL — agents can `def my_helper(...)` mid-run and hand `my_helper` down the same way.
 
 ### 4. Tools must be self-contained

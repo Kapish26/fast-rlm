@@ -204,7 +204,7 @@ result = fast_rlm.run("Pick the short titles from the list." + str(list_of_title
 
 Two rules apply to any tool that may be handed to a sub-agent:
 
-- **Sub-agents do NOT inherit tools automatically.** To give a child a tool, the main agent must pass it explicitly in the REPL: `await llm_query("...", tools=[filter_short])`.
+- **Sub-agents do NOT inherit tools automatically.** To give a child a tool, the main agent must pass it explicitly in the REPL: `await llm_query("...", tools=[filter_short])`. Set `RLMConfig(inherit_tools=True)` to flip that default so every sub-agent starts with its parent's tools; an explicit `tools=[...]` still overrides per call, and `tools=[]` grants none.
 - **Tools must be self-contained.** Do imports *inside* the function body and don't close over REPL-level variables - the child runs in a fresh REPL where outer state does not exist.
 
 The agent can also `def` new functions inside the REPL at any time and pass them down the same way.

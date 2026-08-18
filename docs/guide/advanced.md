@@ -95,6 +95,9 @@ result = await llm_query(
 )
 ```
 
+This is the default. Set `RLMConfig(inherit_tools=True)` to have every sub-agent start with its parent's tools (and pass them down to its own children in turn). An explicit `tools=[...]` on a call still overrides the inherited set, and `tools=[]` gives the child nothing.
+
+
 This rule applies to user-registered tools *and* to functions the parent agent defined itself in its own REPL — agents can `def my_helper(...)` mid-run and hand `my_helper` down the same way.
 
 ### 4. Tools must be self-contained
@@ -215,7 +218,7 @@ text = await mcp_read_resource("db://record/42", server="db")        # [async]
 
 A few rules mirror the Python-tool model:
 
-- **Sub-agents inherit no MCP access by default.** Grant a child specific servers by name: `await llm_query(task, mcp=["fs"])`.
+- **Sub-agents inherit no MCP access by default.** Grant a child specific servers by name: `await llm_query(task, mcp=["fs"])`. Set `RLMConfig(inherit_mcp=True)` to flip that default so every sub-agent can reach the servers its parent can; `mcp=[...]` still narrows a single call, and `mcp=[]` denies one entirely. Inheritance only ever narrows with depth — a child never gains a server its parent was denied. Enable it only when every configured server is safe for sub-agents to call.
 - **Server auth stays host-side.** Headers / spawn-env for a server are never shown to the model.
 - **stdio servers are not sandboxed.** A configured shell or filesystem server runs as a full-privilege host subprocess (and grants Deno `--allow-run`). Only point fast-rlm at servers you trust.
 

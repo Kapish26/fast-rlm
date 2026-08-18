@@ -48,6 +48,14 @@ export interface RlmConfig {
     enable_tools?: boolean;
     enable_structured_io?: boolean;
     enable_compression_guard?: boolean;
+    // Capability inheritance (default false — a sub-agent starts with nothing
+    // its parent did not hand it). When true, a sub-agent spawned without an
+    // explicit `tools=` / `mcp=` on the llm_query call automatically receives
+    // the same Python tools / MCP servers its parent has, and passes them on to
+    // its own children. An explicit argument on the call always wins, including
+    // an empty list, which means "grant nothing".
+    inherit_tools?: boolean;
+    inherit_mcp?: boolean;
     compression_min_chars?: number;
     compression_ratio?: number;
     instruction?: string;
