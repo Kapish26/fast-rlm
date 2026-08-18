@@ -1084,7 +1084,14 @@ Output:\n${stdoutBuffer.trim()}
             return result;
         }
 
-        const hasError = stdoutBuffer.includes("Error");
+        // Whether the step failed is known exactly: runPythonAsync either threw
+        // or it did not. Inferring it from the output text instead (the former
+        // `stdoutBuffer.includes("Error")`) reported a failure whenever a cell
+        // merely printed the word — source that raises ValueError, a test using
+        // assertRaises, a task description mentioning errors — so successful
+        // steps were logged and rendered as errors. This is the same signal the
+        // session sweep above records as `ok: !execThrew`; keep them in step.
+        const hasError = execThrew;
         logger.logStep({
             step: i + 1,
             code,
