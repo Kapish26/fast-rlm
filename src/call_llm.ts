@@ -2,7 +2,14 @@ import { OpenAI } from "openai";
 import chalk from "npm:chalk@5";
 import { buildSystemPrompt, PromptOptions } from "./prompt.ts";
 import { createVertexClient, refreshVertexClient, isVertexModel, stripVertexPrefix } from "./vertex.ts";
-import { confirmAcpDelegation, generateAcpCode, isAcpModel } from "./acp.ts";
+// acp.ts is NOT imported statically: it pulls the ACP provider and the Vercel
+// AI SDK, which are opt-in (`fast-rlm acp install`) and absent from deno.json.
+// A static import would put both in every run's module graph. Only the cheap,
+// dependency-free prefix test is imported eagerly.
+const ACP_PREFIX = "acp:";
+function isAcpModel(model: string): boolean {
+    return model.startsWith(ACP_PREFIX);
+}
 import { anthropicApiKey, confirmAnthropicDelegation, generateAnthropicCode, isAnthropicModel } from "./anthropic.ts";
 import { toUsage } from "./usage.ts";
 
@@ -72,6 +79,7 @@ export async function generate_code(
 ): Promise<CodeReturn> {
     // ACP agents (e.g. "acp:codex") are a separate backend — see acp.ts.
     if (isAcpModel(model_name)) {
+        const { generateAcpCode } = await import("./acp.ts");
         return generateAcpCode(messages, model_name, is_leaf_agent, options, promptOpts, llmKwargs);
     }
 
@@ -173,6 +181,7 @@ export async function confirmDelegation(
     llmKwargs?: Record<string, unknown> | null
 ): Promise<ConfirmResult> {
     if (isAcpModel(model_name)) {
+        const { confirmAcpDelegation } = await import("./acp.ts");
         return confirmAcpDelegation(baseMessages, confirmQuestion, model_name, is_leaf_agent, options, promptOpts, llmKwargs);
     }
 

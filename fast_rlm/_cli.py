@@ -79,11 +79,49 @@ def _print_session(state_file: str):
           f"across {len(queries)} run(s)")
 
 
+def _acp_command(argv: list[str]) -> int:
+    """`fast-rlm acp <install|status>` — manage the opt-in ACP backend.
+
+    ACP is not shipped with fast-rlm: it needs the ACP provider plus the Vercel
+    AI SDK (fetched by Deno) and Node/npx for the bridge packages. Installing is
+    an explicit, one-time step, and `-u` is the single place the pinned versions
+    move — no fast-rlm release required to pick up a newer bridge.
+    """
+    p = argparse.ArgumentParser(
+        prog="fast-rlm acp",
+        description="Install or inspect the optional ACP agent backend.",
+    )
+    sub = p.add_subparsers(dest="action", required=True)
+    inst = sub.add_parser("install", help="Install ACP support (bridge packages).")
+    inst.add_argument("-u", "--update", action="store_true",
+                      help="Upgrade the pinned packages to their latest versions.")
+    sub.add_parser("status", help="Show installed versions and available upgrades.")
+    args = p.parse_args(argv)
+
+    from fast_rlm import _acp_install
+
+    if args.action == "status":
+        return _acp_install.status()
+    try:
+        _acp_install.install(update=args.update)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main():
     """`fast-rlm` CLI entry point — a thin front door over fast_rlm.run()."""
+    # Subcommands are routed before the flat prompt parser so that
+    # `fast-rlm "some prompt"` keeps working exactly as before.
+    if len(sys.argv) > 1 and sys.argv[1] == "acp":
+        sys.exit(_acp_command(sys.argv[2:]))
+
     p = argparse.ArgumentParser(
         prog="fast-rlm",
         description="Run a fast-rlm query from the command line.",
+        epilog="Subcommands: 'fast-rlm acp install [-u]' / 'fast-rlm acp status' "
+               "manage the optional ACP agent backend.",
     )
     p.add_argument("prompt", nargs="?", default=None,
                    help="The task/prompt. Goes into the system prompt as the "

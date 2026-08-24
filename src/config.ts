@@ -20,6 +20,10 @@ export interface AcpAgentSpec {
     auth_method?: string;
     // Extra env vars for the agent process.
     env?: Record<string, string>;
+    // For built-in presets: the npm package spawned as the ACP bridge. Named
+    // here so `fast-rlm acp install` can pin it to an exact version (and follow
+    // an upstream rename) purely through the install marker.
+    bridge_pkg?: string;
     // Config files to write into the throwaway cwd before the agent launches.
     // Keys are relative paths (e.g. ".claude/settings.json", "opencode.json");
     // values are serialized as JSON. Used to inject per-agent permission configs

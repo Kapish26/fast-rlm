@@ -10,13 +10,17 @@
 //     "acp:<name>"                 -> built-in preset or registered backdoor agent
 //     "acp:<name>?model=<modelId>" -> same, overriding the agent's model
 //
+// Opt-in: the ACP provider and the Vercel AI SDK are NOT declared in deno.json
+// and NOT imported statically — they are loaded on first use from the versions
+// recorded by `fast-rlm acp install` (see acp_install.ts). A run that never
+// touches an "acp:" model never resolves either package.
+//
 // Safety: every ACP agent runs in a throwaway temp cwd (so any stray write is
 // contained), and when the resolved agent declares a `readonly_mode` we switch
 // the ACP session into it (e.g. opencode/claude "plan", codex "read-only").
 // Agents with no session modes are contained by the temp cwd alone.
-import { createACPProvider } from "@mcpc/acp-ai-provider";
-import { generateText } from "ai";
 import { buildSystemPrompt, PromptOptions } from "./prompt.ts";
+import { pinBridgeArgs, requireAcpMarker } from "./acp_install.ts";
 import { loadConfig, type AcpAgentSpec } from "./config.ts";
 import type { ApiRetryOptions, CodeReturn, ConfirmResult, Usage } from "./call_llm.ts";
 
@@ -54,10 +58,39 @@ const OPENCODE_CONFIG = {
 };
 
 const PRESETS: Record<string, AcpAgentSpec> = {
-    "claude-code": { command: "npx", args: ["-y", "@zed-industries/claude-code-acp"], readonly_mode: "plan", auth_method: "claude-login", config_files: CLAUDE_CODE_CONFIG },
-    "codex": { command: "npx", args: ["-y", "@zed-industries/codex-acp", "-c", "sandbox_permissions=[]"], readonly_mode: "read-only", auth_method: "chatgpt" },
+    "claude-code": { command: "npx", args: ["-y", "@zed-industries/claude-code-acp"], bridge_pkg: "@zed-industries/claude-code-acp", readonly_mode: "plan", auth_method: "claude-login", config_files: CLAUDE_CODE_CONFIG },
+    "codex": { command: "npx", args: ["-y", "@zed-industries/codex-acp", "-c", "sandbox_permissions=[]"], bridge_pkg: "@zed-industries/codex-acp", readonly_mode: "read-only", auth_method: "chatgpt" },
     "opencode": { command: "opencode", args: ["acp"], readonly_mode: "plan", auth_method: "opencode-login", config_files: OPENCODE_CONFIG },
 };
+
+// Load the two npm dependencies on first use, at the versions the user's
+// install marker pins. Cached for the process. An uninstalled run throws
+// ACP_NOT_INSTALLED from requireAcpMarker() before any resolution is attempted.
+// deno-lint-ignore no-explicit-any
+let acpDeps: { createACPProvider: any; generateText: any } | null = null;
+
+async function loadAcpDeps() {
+    if (acpDeps) return acpDeps;
+    const marker = requireAcpMarker();
+    try {
+        const [provider, aiSdk] = await Promise.all([
+            import(marker.provider_specifier),
+            import(marker.ai_sdk_specifier),
+        ]);
+        acpDeps = {
+            createACPProvider: provider.createACPProvider,
+            generateText: aiSdk.generateText,
+        };
+    } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        throw new Error(
+            `Failed to load the ACP packages recorded in your install marker ` +
+            `(${marker.provider_specifier}, ${marker.ai_sdk_specifier}): ${msg}\n` +
+            `Repair or upgrade the install: fast-rlm acp install -u`,
+        );
+    }
+    return acpDeps;
+}
 
 export function isAcpModel(model: string): boolean {
     return model.startsWith(ACP_PREFIX);
@@ -65,6 +98,8 @@ export function isAcpModel(model: string): boolean {
 
 interface ParsedAcp {
     spec: AcpAgentSpec;
+    // Preset name, used to pin the bridge package to the installed version.
+    name: string;
     // Model id to pass to the agent: ?model= override, else the spec's default.
     modelId?: string;
 }
@@ -92,7 +127,7 @@ function parseAcpModel(model: string): ParsedAcp {
         const params = new URLSearchParams(query);
         modelOverride = params.get("model") ?? undefined;
     }
-    return { spec, modelId: modelOverride ?? spec.model };
+    return { spec, name, modelId: modelOverride ?? spec.model };
 }
 
 // fast-rlm messages are OpenAI-shaped {role, content}. Coerce to the AI SDK's
@@ -148,7 +183,8 @@ async function acpComplete(
     options: ApiRetryOptions | undefined,
     promptOpts: PromptOptions | undefined,
 ): Promise<{ text: string; usage: Usage }> {
-    const { spec, modelId } = parseAcpModel(model_name);
+    const { spec, name, modelId } = parseAcpModel(model_name);
+    const { createACPProvider, generateText } = await loadAcpDeps();
     const cwd = await Deno.makeTempDir({ prefix: "fast_rlm_acp_" });
 
     // Write agent-specific config files into the throwaway cwd before launch.
@@ -165,7 +201,9 @@ async function acpComplete(
 
     const provider = createACPProvider({
         command: spec.command,
-        args: spec.args ?? [],
+        // Bridge packages are pinned to the version `acp install` recorded, so
+        // runs are reproducible; `acp install -u` is the one place they move.
+        args: pinBridgeArgs(name, spec.args ?? [], spec.bridge_pkg),
         env: spec.env,
         authMethodId: spec.auth_method,
         session: { cwd, mcpServers: [] },

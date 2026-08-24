@@ -4,6 +4,66 @@ fast-rlm can drive a coding agent that speaks the
 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/) — Claude Code,
 Codex, opencode, and others — as the model behind a run.
 
+## Installation (opt-in)
+
+ACP support is **not shipped with fast-rlm**. It pulls two npm dependency trees
+(the ACP provider and the Vercel AI SDK) and needs Node/npx for each agent's
+bridge package — overhead that the majority of runs, which use a plain API
+model, should not pay. The engine imports it dynamically, so a non-ACP run never
+resolves either package.
+
+Install it once:
+
+```bash
+fast-rlm acp install       # before your first acp: run
+fast-rlm acp status        # installed versions + available upgrades
+fast-rlm acp install -u    # move to the latest versions
+```
+
+Selecting an `acp:` agent without installing fails immediately with an
+actionable message rather than a module-resolution error from inside the engine.
+
+### Version pinning, and why upgrades are yours
+
+`acp install` resolves the current packages and records them in
+`~/.fast_rlm/acp.json` (override the location with `FAST_RLM_HOME`):
+
+```json
+{
+  "marker_version": 1,
+  "provider_version": "0.3.5",
+  "ai_sdk_version": "6.0.264",
+  "provider_specifier": "npm:@mcpc-tech/acp-ai-provider@0.3.5",
+  "ai_sdk_specifier": "npm:ai@6.0.264",
+  "bridges": { "claude-code": "0.16.2", "codex": "0.16.0" },
+  "bridge_packages": {
+    "claude-code": "@zed-industries/claude-code-acp",
+    "codex": "@zed-industries/codex-acp"
+  }
+}
+```
+
+Runs use exactly these versions — bridges are spawned as `npx -y <pkg>@<version>`
+rather than bare `<pkg>`, so a run is reproducible instead of silently picking up
+whatever npx last fetched.
+
+This is the fix for fast-rlm lagging the ACP ecosystem. The versions are user
+data, not repo constants, so **`fast-rlm acp install -u` picks up a newer ACP
+provider or bridge with no fast-rlm release involved.** A repeat `install`
+without `-u` re-caches the recorded versions — a repair, never a silent upgrade.
+
+Two details worth knowing:
+
+- The **AI SDK version is derived from the ACP provider**, never resolved
+  independently. The provider currently depends on `ai@^6` while `ai@7` is the
+  latest release, so resolving both to "latest" would install an incompatible
+  pair. `acp install` reads the provider's declared range and takes the newest
+  release inside it.
+- If a bridge is **renamed** upstream (as `@zed-industries/claude-code-acp` was,
+  to `@agentclientprotocol/claude-agent-acp`), edit `bridge_packages` in the
+  marker. The package name is marker data too, so following a rename needs no
+  release either.
+
 ## How it works
 
 The ACP agent is treated as a **drop-in model**, exactly like an OpenAI-compatible
@@ -37,18 +97,26 @@ run("What is 2+2?", config=RLMConfig(primary_agent="acp:opencode"))
 
 | `acp:` name      | Launches                                   | Read-only mode |
 | ---------------- | ------------------------------------------ | -------------- |
-| `acp:claude-code`| `npx -y @zed-industries/claude-code-acp`   | `plan` (hard block) |
-| `acp:codex`      | `npx -y @zed-industries/codex-acp`         | `read-only` (approval-gated) |
-| `acp:opencode`   | `opencode acp`                             | `plan` (hard block) |
+| `acp:claude-code`| `npx -y @zed-industries/claude-code-acp@<pinned>` | `plan` (hard block) |
+| `acp:codex`      | `npx -y @zed-industries/codex-acp@<pinned>`       | `read-only` (approval-gated) |
+| `acp:opencode`   | `opencode acp`                                    | `plan` (hard block) |
+
+`<pinned>` is the version `fast-rlm acp install` recorded in your marker.
 
 **Prerequisites:**
 
+- ACP support must be installed: `fast-rlm acp install`.
 - The Claude Code and Codex presets shell out via `npx`, so **Node / npx must be on
-  your PATH**.
+  your PATH**. (`acp:opencode` spawns the `opencode` binary directly and needs no
+  bridge package.)
 - The agent must already be authenticated in its own CLI (e.g. `claude /login`,
   `codex login`, `opencode auth login`).
 
 ## Backdoor: any other ACP agent
+
+Backdoor agents need `fast-rlm acp install` too — the ACP provider is shared by
+every `acp:` agent. Only their bridge versions are unmanaged: they are launched
+exactly as you write them.
 
 Only the three presets above are built in. To use any other ACP agent, register it
 by command under `acp_agents` and select it by name. A registered name overrides a
@@ -90,6 +158,7 @@ acp_agents:
 | `model`         | no       | Default model id (overridable per call via `?model=`). |
 | `auth_method`   | no       | ACP auth method id (e.g. `chatgpt`). Pinning it silences the provider's "authMethodId is not configured" warning; only consulted on the lazy-auth fallback path. |
 | `env`           | no       | Extra environment variables for the agent process. |
+| `bridge_pkg`    | no       | The npm package spawned as the bridge. Built-in presets set this so `acp install` can pin it to an exact version (and follow an upstream rename) via the marker. Backdoor agents are launched as written. |
 | `config_files`  | no       | Map of relative paths → JSON content to write into the temp cwd before launch. Use this to inject per-agent permission configs for custom agents (e.g. `{".claude/settings.json": {"permissions": {"deny": ["Bash(*)"]}}}` for a custom Claude Code variant). |
 
 ## Tool stripping (built-in presets only)

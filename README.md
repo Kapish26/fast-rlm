@@ -42,6 +42,8 @@ pip install fast-rlm
   - macOS/Linux: `curl -fsSL https://deno.land/install.sh | sh`
   - Windows (npm): `npm install -g deno`
 - (Optional) [Bun](https://bun.sh/) — only needed for the TUI log viewer
+- (Optional) Node/npx — only needed for ACP agents, which are opt-in
+  (`fast-rlm acp install`)
 
 ### Environment Variables
 
@@ -99,6 +101,13 @@ fast-rlm "..." --primary-agent acp:opencode --max-depth 2 --max-global-calls 50 
 
 Run `fast-rlm --help` for all flags (`--sub-agent`, `--max-calls`, `--acp-agents`, `--vertex`, …).
 
+There are also two subcommands for the optional ACP backend:
+
+```bash
+fast-rlm acp install [-u]   # install ACP support (-u upgrades the pinned versions)
+fast-rlm acp status         # installed versions + available upgrades
+```
+
 The same file loading is available from Python — `run()` accepts an `input_file` (in place of `query`):
 
 ```python
@@ -114,7 +123,7 @@ The `primary_agent` / `sub_agent` string selects one of four backends:
 | **Any OpenAI-compatible API** (default) | `"gpt-5-mini"`, `"deepseek-chat"`, `"minimax/minimax-m3"` | OpenAI, DeepSeek, OpenRouter (default), or any compatible endpoint |
 | **Vertex AI** | `"vertex/claude-sonnet-4-6"` | Google Cloud (ADC auth) |
 | **Anthropic API** | `"claude-haiku-4-5"`, `"anthropic/claude-sonnet-4-6"` | Native Anthropic; falls back to the OpenAI-compatible endpoint if no key |
-| **ACP coding agent** | `"acp:codex"`, `"acp:claude-code"`, `"acp:opencode"` | Drives a local coding agent, read-only |
+| **ACP coding agent** | `"acp:codex"`, `"acp:claude-code"`, `"acp:opencode"` | Drives a local coding agent, read-only (opt-in: `fast-rlm acp install`) |
 
 Set the credential only for the backend(s) you use — see **Backend setup** at the end of this README. An ACP-only run needs no API key at all.
 
@@ -605,6 +614,12 @@ Token usage is reported (so budgets apply); cost shows `Unknown` (the SDK return
 
 Drives a local coding agent (Claude Code, Codex, opencode) read-only — no API key needed (the agent uses its own CLI login). Because token/cost budgets don't apply to ACP, `max_global_calls` defaults to `50` for ACP runs. See the **ACP agents** section below for presets and the backdoor.
 
+**ACP is opt-in — install it once before first use:**
+
+```bash
+fast-rlm acp install
+```
+
 ```yaml
 primary_agent: "acp:opencode"      # or "acp:claude-code", "acp:codex"
 ```
@@ -616,7 +631,7 @@ primary_agent: "acp:opencode"      # or "acp:claude-code", "acp:codex"
 | OpenAI-compatible | unprefixed (e.g. `gpt-5-mini`) | `RLM_MODEL_API_KEY` → `OPENAI_API_KEY` → `OPENROUTER_API_KEY` (+ optional `RLM_MODEL_BASE_URL`) |
 | Vertex AI | `vertex/…` or `RLM_VERTEX_AI=1` | ADC + `GOOGLE_CLOUD_PROJECT` |
 | Anthropic | `claude-…` / `anthropic/…` | `ANTHROPIC_API_KEY` (or `RLM_ANTHROPIC_API_KEY`) (+ optional `ANTHROPIC_BASE_URL`) |
-| ACP | `acp:…` | none (agent's own CLI login) |
+| ACP | `acp:…` | none (agent's own CLI login); needs `fast-rlm acp install` |
 
 ---
 
@@ -641,10 +656,51 @@ sub_agent:     "acp:codex?model=gpt-5.5-codex"   # ?model= is optional
 run(query, config=RLMConfig(primary_agent="acp:opencode"))
 ```
 
+### Installing ACP support
+
+ACP support ships **disabled**. It needs two npm dependency trees — the ACP
+provider and the Vercel AI SDK — plus Node/npx to spawn each agent's bridge
+package, and none of that is useful to the majority of runs that use a plain
+API model. So it is neither bundled nor resolved unless you ask for it: the
+engine imports it dynamically, and a plain run never sees it in its module
+graph.
+
+```bash
+fast-rlm acp install       # one time, before your first acp: run
+fast-rlm acp status        # what's installed, and what's newer
+fast-rlm acp install -u    # move to the latest versions
+```
+
+Using an `acp:` agent without installing fails immediately, with the fix:
+
+```
+ACP support is not installed.
+
+  'acp:claude-code' needs the ACP bridge packages ...
+
+      fast-rlm acp install
+```
+
+**Versions are yours, not the repo's.** `acp install` resolves the current
+packages and records them in `~/.fast_rlm/acp.json`; runs then use exactly those
+versions, so a run is reproducible instead of silently picking up whatever `npx`
+last fetched. When the ACP ecosystem moves — and it moves faster than fast-rlm
+releases — `fast-rlm acp install -u` is the single place you update. **You never
+have to wait for a new fast-rlm release to use a newer bridge.**
+
+The AI SDK version is derived from what the ACP provider declares, never
+resolved independently (the provider currently pins `ai@^6` while `ai@7` is
+current, so "latest for both" would install an incompatible pair).
+
+If a bridge package is renamed upstream, edit `bridge_packages` in
+`~/.fast_rlm/acp.json` — the package name is marker data too, so a rename also
+needs no release.
+
 **Built-in presets** (verified): `acp:claude-code`, `acp:codex`, `acp:opencode`.
 Claude Code and Codex are launched via their `npx` adapters, so **Node/npx must be
 on PATH** and the agent itself must already be logged in (e.g. `claude /login`,
-`codex login`, `opencode auth login`).
+`codex login`, `opencode auth login`). `acp:opencode` spawns the `opencode`
+binary directly and needs no bridge package.
 
 **Backdoor — any other ACP agent.** Register it by command under `acp_agents`, then
 select it by name. Built-in presets need no entry; a registered name overrides a
