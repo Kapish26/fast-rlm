@@ -58,7 +58,7 @@ export RLM_MODEL_API_KEY=sk-or-...
 | `RLM_MODEL_API_KEY` | API key for the OpenAI-compatible backend (falls back to `OPENAI_API_KEY`, then `OPENROUTER_API_KEY`) | — |
 | `RLM_MODEL_BASE_URL` | OpenAI-compatible base URL | `https://openrouter.ai/api/v1` |
 
-That's all you need to get started. By default, fast-rlm uses [OpenRouter](https://openrouter.ai); you can point it at any OpenAI-compatible API by setting `RLM_MODEL_BASE_URL`. fast-rlm also runs on Vertex AI, the native Anthropic API, and local ACP coding agents — see **Backend setup** at the end of this README.
+That's all you need to get started. By default, fast-rlm uses [OpenRouter](https://openrouter.ai); you can point it at any OpenAI-compatible API by setting `RLM_MODEL_BASE_URL`. fast-rlm also runs on Vertex AI, the native Anthropic API, and local coding agents (Claude Code, Codex, opencode) — see **Backend setup** at the end of this README.
 
 
 ## Quick Start
@@ -123,7 +123,8 @@ The `primary_agent` / `sub_agent` string selects one of four backends:
 | **Any OpenAI-compatible API** (default) | `"gpt-5-mini"`, `"deepseek-chat"`, `"minimax/minimax-m3"` | OpenAI, DeepSeek, OpenRouter (default), or any compatible endpoint |
 | **Vertex AI** | `"vertex/claude-sonnet-4-6"` | Google Cloud (ADC auth) |
 | **Anthropic API** | `"claude-haiku-4-5"`, `"anthropic/claude-sonnet-4-6"` | Native Anthropic; falls back to the OpenAI-compatible endpoint if no key |
-| **ACP coding agent** | `"acp:codex"`, `"acp:claude-code"`, `"acp:opencode"` | Drives a local coding agent, read-only (opt-in: `fast-rlm acp install`) |
+| **CLI coding agent** | `"cli:claude-code?model=claude-sonnet-5"`, `"cli:codex?model=…"`, `"cli:opencode?model=…"` | Drives a local coding agent through its own non-interactive mode. No install step; a model is required |
+| **ACP coding agent** | `"acp:codex"`, `"acp:claude-code"`, `"acp:opencode"` | Same, over the ACP protocol (opt-in: `fast-rlm acp install`) |
 
 Set the credential only for the backend(s) you use — see **Backend setup** at the end of this README. An ACP-only run needs no API key at all.
 
@@ -610,7 +611,22 @@ Token usage is reported (so budgets apply); cost shows `Unknown` (the SDK return
 
 **Prompt caching is automatic.** Unlike OpenAI/Gemini (which cache prefixes on their own), Claude only caches when asked, so fast-rlm attaches `cache_control` breakpoints to the system prompt and the latest message on every native-Anthropic call. This caches the large static system prompt *and* the growing conversation prefix incrementally — matching the automatic caching other providers give you. Cache hits show up as `cached_tokens` in usage. (This applies to the native path only; Claude routed through OpenRouter without an `ANTHROPIC_API_KEY` does not yet get caching.)
 
-### 4. ACP coding agent
+### 4. CLI coding agent (recommended for Claude Code / Codex / opencode)
+
+Drives a local coding agent through its **own** non-interactive mode (`claude -p`,
+`codex exec`, `opencode run`) — no API key needed (the agent uses its own CLI
+login), no install step, and no Node/npx. Unlike ACP there is no bridge package
+between fast-rlm and the agent, so it cannot lag behind a CLI release; and
+because these CLIs report token usage, the token/cost budgets work normally.
+
+```yaml
+primary_agent: "cli:claude-code?model=claude-sonnet-5"   # model is required
+```
+
+See the **CLI agents** guide for presets, registering your own agent, and the
+`cli_minimal` cost option.
+
+### 5. ACP coding agent
 
 Drives a local coding agent (Claude Code, Codex, opencode) read-only — no API key needed (the agent uses its own CLI login). Because token/cost budgets don't apply to ACP, `max_global_calls` defaults to `50` for ACP runs. See the **ACP agents** section below for presets and the backdoor.
 
@@ -631,15 +647,86 @@ primary_agent: "acp:opencode"      # or "acp:claude-code", "acp:codex"
 | OpenAI-compatible | unprefixed (e.g. `gpt-5-mini`) | `RLM_MODEL_API_KEY` → `OPENAI_API_KEY` → `OPENROUTER_API_KEY` (+ optional `RLM_MODEL_BASE_URL`) |
 | Vertex AI | `vertex/…` or `RLM_VERTEX_AI=1` | ADC + `GOOGLE_CLOUD_PROJECT` |
 | Anthropic | `claude-…` / `anthropic/…` | `ANTHROPIC_API_KEY` (or `RLM_ANTHROPIC_API_KEY`) (+ optional `ANTHROPIC_BASE_URL`) |
+| CLI agent | `cli:…` | none (agent's own CLI login) |
 | ACP | `acp:…` | none (agent's own CLI login); needs `fast-rlm acp install` |
+
+---
+
+## CLI agents (Claude Code, Codex, opencode)
+
+Drives a coding agent through its **own** non-interactive mode as the "brain".
+The agent gets fast-rlm's system prompt + history and replies with a
+```` ```repl ```` block, which fast-rlm executes in its own Pyodide sandbox —
+exactly like any other model. **The agent never runs the code or writes files.**
+
+Nothing to install: you need only the agent's CLI, logged in as usual.
+
+```yaml
+primary_agent: "cli:claude-code?model=claude-sonnet-5"
+sub_agent:     "cli:codex?model=gpt-5.5-codex"
+```
+
+**A model is required.** Omit it and the run fails immediately: left unset the
+model is whatever the vendor's CLI defaults to — it drifts between releases, it
+is invisible in your config, and for Claude Code it is Opus (~$0.17/step).
+
+| `cli:` name       | Launches                                | Isolation |
+|---|---|---|
+| `cli:claude-code` | `claude -p --output-format json`        | `--disallowedTools` + temp cwd |
+| `cli:codex`       | `codex exec --json --sandbox read-only` | read-only sandbox + temp cwd |
+| `cli:opencode`    | `opencode run --format json --pure`     | temp cwd |
+
+**Why prefer this over `acp:`** for these three agents: no bridge package
+between fast-rlm and the agent (so nothing to lag behind a CLI release), no
+Node/npx, no install step, subprocess permission scoped to the named binaries
+instead of a blanket grant — and **token/cost budgets work**, because these CLIs
+report usage where ACP reports none.
+
+> **Billing safety.** `claude` silently prefers `ANTHROPIC_API_KEY` over your
+> Pro/Max login, so a run you think uses your plan gets metered instead — with
+> no warning. `cli:claude-code` therefore **refuses to start** while that key is
+> set; unset it, or opt in explicitly with `cli_allow_api_key`. The preset also
+> pins **Sonnet** (Claude Code's own default is Opus, ~$0.17/step); override
+> Aliases and exact ids both pass through (`?model=sonnet`,
+> `?model=claude-sonnet-5`); pin an exact id for anything you need to reproduce
+> later.
+
+**`cli_minimal`** enables each preset's extra cost-saving flags (Claude's
+`--bare`): measured at 8,465 prompt tokens/step versus 25,680, and $0.055 versus
+$0.161. It is off by default because `--bare` never reads the interactive login
+and so requires `ANTHROPIC_API_KEY`.
+
+**Register any other agent** with a JSON non-interactive mode under `cli_agents`
+— declarative `command`/`args`/`extract`/`usage`, no code changes. A registered
+name overrides a built-in preset, which is how you repair one locally after an
+upstream flag change without waiting for a fast-rlm release.
+
+**Keeping work in the REPL.** A coding agent with its own shell can compute
+internally and return a hardcoded answer — indistinguishable from REPL work
+unless you look. Each preset was tested with a planted canary file:
+`cli:claude-code` (`--disallowedTools`) and `cli:opencode` (injected
+`opencode.json`, including `task` — its subagents do not inherit denials) can
+neither read the file nor run a shell command. **Codex cannot be locked down at
+all** — `--sandbox read-only` still permits reads and command execution — so its
+bypasses are *detected* from its event stream and fail the run by default
+(`cli_native_tools`).
+
+Verify any of it yourself:
+
+```bash
+python scripts/verify_agents.py --all      # un-guessable data + transcript audit
+```
+
+See the [CLI agents guide](docs/guide/cli-agents.md) for the full spec.
 
 ---
 
 ## ACP agents (Claude Code, Codex, opencode, …)
 
-Besides OpenAI-compatible and Vertex models, fast-rlm can use a coding agent that
-speaks the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/) as the
-"brain". The agent is prompted with fast-rlm's system prompt + history and replies
+fast-rlm can also use any agent that speaks the
+[Agent Client Protocol (ACP)](https://agentclientprotocol.com/) as the "brain".
+**For Claude Code, Codex and opencode, prefer the `cli:` backend above** — ACP is
+the route for other ACP-speaking agents, and remains fully supported. The agent is prompted with fast-rlm's system prompt + history and replies
 with a ```` ```repl ```` block, which fast-rlm executes in its own Pyodide sandbox —
 exactly like any other model. **The agent itself runs read-only and never writes
 files or runs the code; fast-rlm does.**

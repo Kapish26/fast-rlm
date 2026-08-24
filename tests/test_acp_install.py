@@ -137,3 +137,109 @@ def test_run_gates_on_acp_sub_agent(home):
             "hi",
             config={"primary_agent": "z-ai/glm-5", "sub_agent": "acp:codex"},
         )
+
+
+# ---- Regressions from code review -------------------------------------------
+
+
+def test_install_preserves_renamed_bridge_package(home, monkeypatch):
+    """A user-edited bridge package name survives the next install.
+
+    Following an upstream rename is documented as a marker edit, so `install`
+    must not stomp `bridge_packages` back to the built-in defaults — and must
+    resolve the version against the RENAMED package, not the old one.
+    """
+    renamed = "@agentclientprotocol/claude-agent-acp"
+    _write_marker(home, bridge_packages={**acp.BRIDGE_PKGS, "claude-code": renamed})
+
+    asked = []
+
+    def fake_latest(pkg):
+        asked.append(pkg)
+        return "5.0.0"
+
+    monkeypatch.setattr(acp, "_npm_latest", fake_latest)
+    monkeypatch.setattr(acp, "_resolve_ai_sdk", lambda v: "6.0.264")
+    monkeypatch.setattr(acp, "_cache_specifiers", lambda specs: None)
+    monkeypatch.setattr("fast_rlm._runner._check_deno", lambda: None)
+
+    marker = acp.install(update=True)
+    assert marker["bridge_packages"]["claude-code"] == renamed
+    assert renamed in asked
+    assert "@zed-industries/claude-code-acp" not in asked
+
+
+def test_install_survives_unreachable_npm_for_bridges(home, monkeypatch):
+    """A bridge lookup failure must not abort a first-time install.
+
+    Bridges are optional to pin — pinBridgeArgs falls back to unpinned npx — so
+    only the provider is fatal.
+    """
+    def fake_latest(pkg):
+        return "0.3.5" if pkg == acp.ACP_PROVIDER_PKG else None
+
+    monkeypatch.setattr(acp, "_npm_latest", fake_latest)
+    monkeypatch.setattr(acp, "_resolve_ai_sdk", lambda v: "6.0.264")
+    monkeypatch.setattr(acp, "_cache_specifiers", lambda specs: None)
+    monkeypatch.setattr("fast_rlm._runner._check_deno", lambda: None)
+
+    marker = acp.install()
+    assert marker["provider_version"] == "0.3.5"
+    assert marker["bridges"] == {}  # unpinned; npx resolves at launch
+    assert acp.is_installed() is True
+
+
+def test_install_still_fails_when_provider_unresolvable(home, monkeypatch):
+    """The provider is not optional — without it there is nothing to import."""
+    monkeypatch.setattr(acp, "_npm_latest", lambda pkg: None)
+    monkeypatch.setattr(acp, "_cache_specifiers", lambda specs: None)
+    monkeypatch.setattr("fast_rlm._runner._check_deno", lambda: None)
+
+    with pytest.raises(RuntimeError, match="Could not resolve a version"):
+        acp.install()
+
+
+def test_status_tolerates_marker_without_provider_version(home, capsys):
+    """A hand-edited marker must not produce a '...@None' npm lookup."""
+    _write_marker(home)
+    marker = json.loads((home / "acp.json").read_text())
+    del marker["provider_version"]
+    (home / "acp.json").write_text(json.dumps(marker))
+
+    acp.status()
+    assert "@None" not in capsys.readouterr().out
+
+
+def test_acp_install_command_reports_subprocess_failure(home, monkeypatch, capsys):
+    """A failed `deno cache` exits 1 with a message, not a traceback."""
+    import subprocess
+
+    from fast_rlm._cli import _acp_command
+
+    monkeypatch.setattr(acp, "_npm_latest", lambda pkg: "1.0.0")
+    monkeypatch.setattr(acp, "_resolve_ai_sdk", lambda v: "6.0.264")
+    monkeypatch.setattr("fast_rlm._runner._check_deno", lambda: None)
+
+    def boom(specs):
+        raise subprocess.CalledProcessError(1, ["deno", "cache", "x.ts"])
+
+    monkeypatch.setattr(acp, "_cache_specifiers", boom)
+    assert _acp_command(["install"]) == 1
+    assert "Error:" in capsys.readouterr().err
+
+
+def test_acp_install_command_reports_timeout(home, monkeypatch, capsys):
+    import subprocess
+
+    from fast_rlm._cli import _acp_command
+
+    monkeypatch.setattr(acp, "_npm_latest", lambda pkg: "1.0.0")
+    monkeypatch.setattr(acp, "_resolve_ai_sdk", lambda v: "6.0.264")
+    monkeypatch.setattr("fast_rlm._runner._check_deno", lambda: None)
+
+    def boom(specs):
+        raise subprocess.TimeoutExpired(["deno", "cache"], 600)
+
+    monkeypatch.setattr(acp, "_cache_specifiers", boom)
+    assert _acp_command(["install"]) == 1
+    assert "timed out" in capsys.readouterr().err

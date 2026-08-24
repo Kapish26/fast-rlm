@@ -80,6 +80,11 @@ ACP support is not installed.
   shipped with fast-rlm, so they are installed on demand:
 
       fast-rlm acp install
+
+  Or skip ACP entirely: for Claude Code, Codex and opencode the cli: backend
+  drives the agent's own CLI, needing no bridge packages and no Node —
+
+      primary_agent: "cli:claude-code"   (or cli:codex / cli:opencode)
 """
 
 
@@ -186,8 +191,13 @@ def install(update: bool = False) -> dict:
     old_provider = existing.get("provider_version")
     old_ai = existing.get("ai_sdk_version")
     old_bridges = existing.get("bridges", {})
+    # Bridge package NAMES are user-editable: following an upstream rename is a
+    # marker edit (see src/acp_install.ts), so an existing marker's names win
+    # over the built-in defaults and versions are resolved against them. New
+    # presets added by a fast-rlm upgrade are filled in from BRIDGE_PKGS.
+    bridge_pkgs = {**BRIDGE_PKGS, **(existing.get("bridge_packages") or {})}
 
-    def pick(current: Optional[str], pkg: str) -> str:
+    def pick(current: Optional[str], pkg: str, required: bool = True) -> Optional[str]:
         if current and not update:
             return current
         latest = _npm_latest(pkg)
@@ -196,6 +206,11 @@ def install(update: bool = False) -> dict:
         if current:
             print(f"  ! could not reach npm for {pkg}; keeping {current}")
             return current
+        if not required:
+            # Bridges are optional to pin: pinBridgeArgs falls back to unpinned
+            # npx, so a lookup failure must not abort the whole install.
+            print(f"  ! could not reach npm for {pkg}; it will resolve to latest at launch")
+            return None
         raise RuntimeError(
             f"Could not resolve a version for {pkg}. npm must be on PATH and "
             f"reachable to install ACP support (`npm view {pkg} version`)."
@@ -214,9 +229,11 @@ def install(update: bool = False) -> dict:
                 f"{ACP_PROVIDER_PKG}@{provider_version} requires. npm must be on "
                 f"PATH and reachable to install ACP support."
             )
-    bridges = {
-        name: pick(old_bridges.get(name), pkg) for name, pkg in BRIDGE_PKGS.items()
-    }
+    bridges = {}
+    for name, pkg in bridge_pkgs.items():
+        version = pick(old_bridges.get(name), pkg, required=False)
+        if version is not None:
+            bridges[name] = version
 
     provider_spec = f"npm:{ACP_PROVIDER_PKG}@{provider_version}"
     ai_spec = f"npm:{AI_SDK_PKG}@{ai_version}"
@@ -224,7 +241,7 @@ def install(update: bool = False) -> dict:
     print(f"  {ACP_PROVIDER_PKG}@{provider_version}")
     print(f"  {AI_SDK_PKG}@{ai_version}")
     for name, version in bridges.items():
-        print(f"  {BRIDGE_PKGS[name]}@{version}  (bridge: acp:{name})")
+        print(f"  {bridge_pkgs[name]}@{version}  (bridge: acp:{name})")
 
     print("Downloading into Deno's cache...")
     _cache_specifiers([provider_spec, ai_spec])
@@ -236,7 +253,7 @@ def install(update: bool = False) -> dict:
         "provider_specifier": provider_spec,
         "ai_sdk_specifier": ai_spec,
         "bridges": bridges,
-        "bridge_packages": dict(BRIDGE_PKGS),
+        "bridge_packages": bridge_pkgs,
     }
     marker_dir().mkdir(parents=True, exist_ok=True)
     with open(marker_path(), "w") as f:
@@ -262,16 +279,28 @@ def status() -> int:
     rows = [
         (ACP_PROVIDER_PKG, provider_version, None),
         # Bounded by the provider's declared range, so "latest" is the newest
-        # compatible release rather than the newest release overall.
-        (AI_SDK_PKG, marker.get("ai_sdk_version"), _resolve_ai_sdk(provider_version)),
+        # compatible release rather than the newest release overall. A marker
+        # missing provider_version (hand-edited) simply skips the range lookup.
+        (
+            AI_SDK_PKG,
+            marker.get("ai_sdk_version"),
+            _resolve_ai_sdk(provider_version) if provider_version else None,
+        ),
     ]
+    # Package names come from the marker so a rename shows the renamed package.
+    marker_pkgs = {**BRIDGE_PKGS, **(marker.get("bridge_packages") or {})}
     rows += [
-        (BRIDGE_PKGS[name], version, None)
+        (marker_pkgs.get(name, name), version, None)
         for name, version in (marker.get("bridges") or {}).items()
-        if name in BRIDGE_PKGS
     ]
     stale = False
     for pkg, version, pinned_latest in rows:
+        if not version:
+            # Hand-edited or partially-written marker: report the gap rather
+            # than rendering "<pkg>@None" and comparing it against npm.
+            print(f"  {pkg}: version not recorded — repair with: fast-rlm acp install")
+            stale = True
+            continue
         latest = pinned_latest if pinned_latest is not None else _npm_latest(pkg)
         if latest is None:
             note = "  (npm unreachable)"

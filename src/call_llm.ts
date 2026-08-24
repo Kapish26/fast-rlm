@@ -1,3 +1,4 @@
+import { parseConfirmVerdict } from "./confirm.ts";
 import { OpenAI } from "openai";
 import chalk from "npm:chalk@5";
 import { buildSystemPrompt, PromptOptions } from "./prompt.ts";
@@ -10,6 +11,8 @@ const ACP_PREFIX = "acp:";
 function isAcpModel(model: string): boolean {
     return model.startsWith(ACP_PREFIX);
 }
+// cli_agent.ts has no third-party dependencies, so it is imported eagerly.
+import { confirmCliDelegation, generateCliCode, isCliModel } from "./cli_agent.ts";
 import { anthropicApiKey, confirmAnthropicDelegation, generateAnthropicCode, isAnthropicModel } from "./anthropic.ts";
 import { toUsage } from "./usage.ts";
 
@@ -78,6 +81,12 @@ export async function generate_code(
     llmKwargs?: Record<string, unknown> | null
 ): Promise<CodeReturn> {
     // ACP agents (e.g. "acp:codex") are a separate backend — see acp.ts.
+    // Direct-CLI agents (e.g. "cli:claude-code") drive the agent's own
+    // non-interactive mode — see cli_agent.ts.
+    if (isCliModel(model_name)) {
+        return generateCliCode(messages, model_name, is_leaf_agent, options, promptOpts, llmKwargs);
+    }
+
     if (isAcpModel(model_name)) {
         const { generateAcpCode } = await import("./acp.ts");
         return generateAcpCode(messages, model_name, is_leaf_agent, options, promptOpts, llmKwargs);
@@ -180,6 +189,10 @@ export async function confirmDelegation(
     promptOpts?: PromptOptions,
     llmKwargs?: Record<string, unknown> | null
 ): Promise<ConfirmResult> {
+    if (isCliModel(model_name)) {
+        return confirmCliDelegation(baseMessages, confirmQuestion, model_name, is_leaf_agent, options, promptOpts, llmKwargs);
+    }
+
     if (isAcpModel(model_name)) {
         const { confirmAcpDelegation } = await import("./acp.ts");
         return confirmAcpDelegation(baseMessages, confirmQuestion, model_name, is_leaf_agent, options, promptOpts, llmKwargs);
@@ -236,8 +249,7 @@ export async function confirmDelegation(
     const usage = toUsage(completion.usage);
 
     // Fail-open: only an explicit "NO" (as the first word) rejects.
-    const firstWord = content.replace(/^[^a-zA-Z]+/, "").slice(0, 4).toUpperCase();
-    const approve = !firstWord.startsWith("NO");
+    const { approve } = parseConfirmVerdict(content);
     return { approve, reason: content || "(no reason given)", usage };
 }
 

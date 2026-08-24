@@ -8,6 +8,7 @@
 //
 // Model id: any "anthropic/" prefix is stripped to the native id (e.g.
 // "anthropic/claude-haiku-4-5" -> "claude-haiku-4-5").
+import { parseConfirmVerdict } from "./confirm.ts";
 import Anthropic from "@anthropic-ai/sdk";
 import { buildSystemPrompt, PromptOptions } from "./prompt.ts";
 import type { ApiRetryOptions, CodeReturn, ConfirmResult, Usage } from "./call_llm.ts";
@@ -165,7 +166,6 @@ export async function confirmAnthropicDelegation(
     const { text, usage } = await anthropicComplete(messages, model_name, is_leaf_agent, options, promptOpts, llmKwargs);
     const content = text.trim();
     // Fail-open: only an explicit "NO" (as the first word) rejects.
-    const firstWord = content.replace(/^[^a-zA-Z]+/, "").slice(0, 4).toUpperCase();
-    const approve = !firstWord.startsWith("NO");
+    const { approve } = parseConfirmVerdict(content);
     return { approve, reason: content || "(no reason given)", usage };
 }

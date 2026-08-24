@@ -4,6 +4,12 @@ fast-rlm can drive a coding agent that speaks the
 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/) — Claude Code,
 Codex, opencode, and others — as the model behind a run.
 
+!!! tip "For Claude Code, Codex and opencode, prefer `cli:`"
+    [CLI agents](cli-agents.md) drive those three through their own
+    non-interactive modes. No install step, no Node/npx, no bridge package to
+    fall behind — and token/cost budgets actually work. ACP remains the route
+    for any *other* agent that speaks the protocol, and stays fully supported.
+
 ## Installation (opt-in)
 
 ACP support is **not shipped with fast-rlm**. It pulls two npm dependency trees

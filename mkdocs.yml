@@ -51,6 +51,7 @@ nav:
       - Configuration: guide/configuration.md
       - Resumable Sessions: guide/sessions.md
       - Advanced Customization: guide/advanced.md
+      - CLI Agents: guide/cli-agents.md
       - ACP Agents: guide/acp-agents.md
       - Log Viewer: guide/log-viewer.md
       - Best Practices & Troubleshooting: guide/tips.md

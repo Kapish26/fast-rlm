@@ -19,6 +19,7 @@
 // contained), and when the resolved agent declares a `readonly_mode` we switch
 // the ACP session into it (e.g. opencode/claude "plan", codex "read-only").
 // Agents with no session modes are contained by the temp cwd alone.
+import { parseConfirmVerdict } from "./confirm.ts";
 import { buildSystemPrompt, PromptOptions } from "./prompt.ts";
 import { pinBridgeArgs, requireAcpMarker } from "./acp_install.ts";
 import { loadConfig, type AcpAgentSpec } from "./config.ts";
@@ -263,7 +264,6 @@ export async function confirmAcpDelegation(
     const { text, usage } = await acpComplete(messages, model_name, is_leaf_agent, options, promptOpts);
     const content = text.trim();
     // Fail-open: only an explicit "NO" (as the first word) rejects.
-    const firstWord = content.replace(/^[^a-zA-Z]+/, "").slice(0, 4).toUpperCase();
-    const approve = !firstWord.startsWith("NO");
+    const { approve } = parseConfirmVerdict(content);
     return { approve, reason: content || "(no reason given)", usage };
 }

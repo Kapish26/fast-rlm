@@ -57,7 +57,9 @@ export function loadAcpMarker(): AcpMarker | null {
 
 export const ACP_NOT_INSTALLED =
     "ACP support is not installed.\n\n" +
-    "  Install it:  fast-rlm acp install";
+    "  Install it:  fast-rlm acp install\n" +
+    "  Or use the cli: backend, which needs no bridge packages and no Node:\n" +
+    "               primary_agent=\"cli:claude-code\"  (or cli:codex / cli:opencode)";
 
 // The marker, or a hard error naming the fix. Called by acp.ts before it
 // resolves any npm dependency, so an uninstalled run fails with this message

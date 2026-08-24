@@ -104,8 +104,16 @@ def _acp_command(argv: list[str]) -> int:
         return _acp_install.status()
     try:
         _acp_install.install(update=args.update)
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
         print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except subprocess.TimeoutExpired:
+        print("Error: timed out downloading the ACP packages. Check your network "
+              "and retry: fast-rlm acp install", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as e:
+        print(f"Error: '{' '.join(str(a) for a in (e.cmd or []))}' failed with exit "
+              f"code {e.returncode} while caching the ACP packages.", file=sys.stderr)
         return 1
     return 0
 
@@ -133,7 +141,8 @@ def main():
                         "itself (the extension is passed to it). Becomes the query "
                         "context; the prompt stays the instruction.")
     p.add_argument("--primary-agent", default=None,
-                   help="Root-agent model (e.g. 'z-ai/glm-5', 'acp:opencode').")
+                   help="Root-agent model (e.g. 'z-ai/glm-5', 'cli:claude-code', "
+                        "'acp:opencode').")
     p.add_argument("--sub-agent", default=None,
                    help="Sub-agent model (defaults to --primary-agent).")
     p.add_argument("--max-depth", type=int, default=None,
@@ -146,6 +155,17 @@ def main():
     p.add_argument("--acp-agents", default=None,
                    help="JSON registry of custom ACP agents (or @file.json). "
                         "Only needed for non-preset agents.")
+    p.add_argument("--cli-agents", default=None,
+                   help="JSON registry of custom CLI agents (or @file.json). "
+                        "Also overrides a built-in cli: preset by name.")
+    p.add_argument("--cli-allow-api-key", action="store_true",
+                   help="Allow a cli: agent to run while an API key that would "
+                        "override its subscription login is set (accepts metered "
+                        "API billing). Implied by --cli-minimal.")
+    p.add_argument("--cli-minimal", action="store_true",
+                   help="Enable each cli: preset's minimal flags (claude --bare: "
+                        "much cheaper per step, but requires ANTHROPIC_API_KEY "
+                        "because that mode ignores the interactive login).")
     p.add_argument("--prefix", default=None, help="Log filename prefix.")
     p.add_argument("--log-dir", default=None,
                    help="Directory for the run's .jsonl transcript (default: ./logs).")
@@ -199,6 +219,16 @@ def main():
             with open(raw[1:]) as f:
                 raw = f.read()
         config["acp_agents"] = json.loads(raw)
+    if args.cli_agents:
+        raw = args.cli_agents
+        if raw.startswith("@"):
+            with open(raw[1:]) as f:
+                raw = f.read()
+        config["cli_agents"] = json.loads(raw)
+    if args.cli_minimal:
+        config["cli_minimal"] = True
+    if args.cli_allow_api_key:
+        config["cli_allow_api_key"] = True
 
     # Imported here so `fast-rlm-log` and --help don't pay the import cost.
     from fast_rlm._runner import run
@@ -253,8 +283,10 @@ def _print_stats(log_path: str):
     for e in entries:
         u = e.get("usage")
         if u:
-            total_tokens += u.get("total_tokens", 0)
-            total_cost += u.get("cost", 0)
+            total_tokens += u.get("total_tokens") or 0
+            # `or 0`, not a default: backends that report no cost (ACP, codex)
+            # write an explicit null, which a default never catches.
+            total_cost += u.get("cost") or 0
 
     max_depth = max(e.get("depth", 0) for e in entries)
     roots = [r for r in runs.values() if r["depth"] == 0]

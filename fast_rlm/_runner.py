@@ -213,6 +213,25 @@ class RLMConfig:
     #   acp_agents={"hermes": {"command": "hermes", "args": ["acp"]}}
     # Each value: {command, args?, readonly_mode?, model?, env?}.
     acp_agents: Optional[dict] = None
+    # CLI agents: drive a coding agent through its own non-interactive mode
+    # (`claude -p`, `codex exec`, `opencode run`) instead of over ACP, selected
+    # as primary_agent/sub_agent="cli:<name>". Built-in presets (cli:claude-code,
+    # cli:codex, cli:opencode) need no entry; register others, or override a
+    # preset by re-declaring its name — which is how a CLI flag change is
+    # repaired locally, with no fast-rlm release. Example:
+    #   cli_agents={"mycli": {"command": "mycli", "args": ["--json"],
+    #                         "extract": {"kind": "json", "path": "reply"}}}
+    cli_agents: Optional[dict] = None
+    # Opt into each CLI preset's extra "minimal" flags (claude's --bare: far
+    # cheaper per step, but that mode never reads the agent's interactive login,
+    # so it requires ANTHROPIC_API_KEY). Off by default so subscription logins
+    # keep working.
+    cli_minimal: bool = False
+    # Permit a CLI agent to run while an API key that would override its
+    # subscription login is set (see _check_cli_auth). Off by default so a
+    # stray ANTHROPIC_API_KEY cannot quietly meter a run that was meant to use
+    # your plan. Implied by cli_minimal, whose --bare mode needs the key.
+    cli_allow_api_key: bool = False
 
     @classmethod
     def default(cls) -> "RLMConfig":
@@ -244,6 +263,111 @@ def _find_engine_dir() -> Path:
         "Cannot find the fast-rlm TS engine. "
         "Ensure the package is installed correctly or you're in the project root."
     )
+
+
+# Built-in cli: preset -> binary. Mirrors PRESETS in src/cli_agent.ts; used only
+# to scope --allow-run, so an unknown name simply falls back to a broad grant.
+_CLI_PRESET_BINARIES = {
+    "claude-code": "claude",
+    "codex": "codex",
+    "opencode": "opencode",
+}
+
+# Env vars that make a preset bill the wrong account. Mirrors `forbid_env` in
+# src/cli_agent.ts; checked here too so the run dies in Python before anything
+# is spawned, rather than one subprocess deeper.
+_CLI_PRESET_FORBIDDEN_ENV = {
+    "claude-code": ["ANTHROPIC_API_KEY"],
+}
+
+# Presets that take a model flag, and therefore require an explicit model.
+# Mirrors `model_flag` in src/cli_agent.ts.
+_CLI_PRESETS_NEED_MODEL = {"claude-code", "codex", "opencode"}
+
+
+def _check_cli_model(agents: list[str], registry: Optional[dict]) -> None:
+    """Require an explicit model for every CLI agent that can take one.
+
+    Left unset, the model is whatever the vendor's CLI currently defaults to: it
+    changes between releases, it does not appear anywhere in the run's config,
+    and for Claude Code it is Opus — the most expensive option. fast-rlm does
+    not guess on the user's behalf.
+    """
+    from urllib.parse import parse_qs
+
+    registry = registry or {}
+    for agent in agents:
+        name, _, query = agent[4:].partition("?")
+        stated = bool(parse_qs(query).get("model", [""])[0])
+        spec = registry.get(name)
+        if isinstance(spec, dict):
+            takes_model = bool(spec.get("model_flag"))
+            stated = stated or bool(spec.get("model"))
+        else:
+            takes_model = name in _CLI_PRESETS_NEED_MODEL
+        if not takes_model or stated:
+            continue
+        raise RuntimeError(
+            f"{agent!r} does not specify a model, and fast-rlm does not pick one "
+            f"for you.\n\n"
+            f"  Left unset, the model is whatever the agent's CLI currently "
+            f"defaults to — it changes between releases, it is invisible in your "
+            f"run config, and for Claude Code it is Opus, the most expensive "
+            f"option.\n\n"
+            f'  Per run:      primary_agent="cli:{name}?model=<id>"\n'
+            f'  Per project:  set "model" on the agent\'s cli_agents entry\n\n'
+            f"  Aliases and exact ids both work; pin an exact id for anything you "
+            f"need to reproduce later."
+        )
+
+
+def _check_cli_auth(agents: list[str], registry: Optional[dict], allow_api_key: bool) -> None:
+    """Refuse to run a CLI agent that would silently bill an API key.
+
+    `claude` prefers ANTHROPIC_API_KEY over an interactive subscription login
+    with no error and no warning fast-rlm can surface, so a run that looks like
+    it is using your plan is metered instead. Fail loudly rather than quietly
+    spend money.
+    """
+    if allow_api_key:
+        return
+    registry = registry or {}
+    for agent in agents:
+        name = agent[4:].split("?", 1)[0]
+        spec = registry.get(name)
+        if isinstance(spec, dict):
+            forbidden = spec.get("forbid_env") or []
+        else:
+            forbidden = _CLI_PRESET_FORBIDDEN_ENV.get(name, [])
+        present = [k for k in forbidden if os.environ.get(k)]
+        if not present:
+            continue
+        joined = ", ".join(present)
+        raise RuntimeError(
+            f"{agent!r} refuses to run while {joined} is set.\n\n"
+            f"  The agent's CLI silently prefers that key over your subscription "
+            f"login, so this run would be billed per token instead of using your "
+            f"plan — with no warning.\n\n"
+            f"  Use your subscription:  unset {' '.join(present)}\n"
+            f"  Or accept API billing:  RLMConfig(cli_allow_api_key=True), or "
+            f"--cli-allow-api-key\n"
+            f"  cli_minimal implies it: that mode cannot read a subscription login."
+        )
+
+
+def _cli_binaries(agents: list[str], registry: Optional[dict]) -> set[str]:
+    """Binaries the given cli: agents will spawn, for a scoped --allow-run."""
+    registry = registry or {}
+    bins: set[str] = set()
+    for agent in agents:
+        name = agent[4:].split("?", 1)[0]
+        spec = registry.get(name)
+        command = spec.get("command") if isinstance(spec, dict) else None
+        command = command or _CLI_PRESET_BINARIES.get(name)
+        if not command:
+            return set()  # unknown agent -> let the engine raise, grant broadly
+        bins.add(command)
+    return bins
 
 
 def _check_deno():
@@ -506,9 +630,16 @@ def run(
         "--allow-write",
     ]
 
+    # Subprocess permission is collected across every feature that needs it and
+    # emitted ONCE below. Deno takes the union of repeated --allow-run flags, so
+    # appending a scoped grant next to a blanket one silently widens it back to
+    # allow-all — the scoping has to be decided in one place.
+    _run_bins: set[str] = set()   # binaries to allow
+    _run_any = False              # True -> blanket grant (unknowable binaries)
+
     # Vertex AI ADC via gcloud CLI needs subprocess permission
     if vertex:
-        cmd.append("--allow-run=gcloud")
+        _run_bins.add("gcloud")
 
     # ACP agents are spawned as child processes (e.g. npx/opencode), so the Deno
     # host needs --allow-run when either agent is an "acp:" model. ACP is opt-in:
@@ -520,7 +651,26 @@ def run(
         from fast_rlm._acp_install import require_installed
 
         require_installed(_acp_agents_used[0])
-        cmd.append("--allow-run")
+        # ACP shells out to npx, which then runs whatever it downloaded — the
+        # set of binaries is not knowable up front.
+        _run_any = True
+
+    # CLI agents spawn the agent's own binary. Unlike ACP (which needs blanket
+    # --allow-run to reach npx and whatever it downloads), the set of binaries
+    # is known up front, so scope the grant to exactly those.
+    _cli_agents_used = [a for a in _agents if a.startswith("cli:")]
+    if _cli_agents_used:
+        _check_cli_model(_cli_agents_used, merged_config.get("cli_agents"))
+        _check_cli_auth(
+            _cli_agents_used,
+            merged_config.get("cli_agents"),
+            bool(merged_config.get("cli_allow_api_key") or merged_config.get("cli_minimal")),
+        )
+        _bins = _cli_binaries(_cli_agents_used, merged_config.get("cli_agents"))
+        if _bins:
+            _run_bins |= _bins
+        else:
+            _run_any = True  # unresolvable name; the engine raises a clear error
 
     cmd += [
         "src/subagents.ts",
@@ -588,9 +738,15 @@ def run(
             isinstance(k, str) and isinstance(v, dict) for k, v in mcp_servers.items()
         ):
             raise TypeError("mcp_servers must be a dict[str, dict]")
-        # stdio servers (no 'url') require Deno to spawn subprocesses.
-        if any("url" not in cfg for cfg in mcp_servers.values()):
-            cmd.insert(cmd.index("src/subagents.ts"), "--allow-run")
+        # stdio servers (no 'url') require Deno to spawn subprocesses. Their
+        # commands are known, so scope to them rather than granting everything.
+        _stdio = [cfg for cfg in mcp_servers.values() if "url" not in cfg]
+        if _stdio:
+            _cmds = {c.get("command") for c in _stdio}
+            if all(isinstance(c, str) and c for c in _cmds):
+                _run_bins |= _cmds
+            else:
+                _run_any = True
         mcp_tmpfile = tempfile.mktemp(suffix=".mcp.json")
         with open(mcp_tmpfile, "w") as f:
             json.dump(mcp_servers, f)
@@ -606,6 +762,17 @@ def run(
         with open(llm_kwargs_tmpfile, "w") as f:
             json.dump(llm_kwargs, f)
         cmd += ["--llm-kwargs-file", llm_kwargs_tmpfile]
+
+    # Emit the single subprocess grant now that every feature has declared what
+    # it needs. Deno permission flags must precede the script path, and one
+    # blanket grant anywhere would override every scoped one — hence one flag.
+    if _run_any:
+        cmd.insert(cmd.index("src/subagents.ts"), "--allow-run")
+    elif _run_bins:
+        cmd.insert(
+            cmd.index("src/subagents.ts"),
+            f"--allow-run={','.join(sorted(_run_bins))}",
+        )
 
     # Write the merged+validated config (always present — primary_agent is required)
     # to a temp file and hand it to the engine.
