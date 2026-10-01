@@ -42,7 +42,7 @@ def test_cypher_config_defaults():
     assert config.max_cypher_queries == 5
     assert config.max_cypher_rows == 100
     assert config.cypher_timeout_ms == 15000
-    assert config.max_neo4j_observation_bytes == 8192
+    assert config.max_neo4j_observation_bytes == 4096
     assert config.max_neo4j_transcript_bytes == 10240
     assert config.max_neo4j_query_artifact_bytes == 1048576
     assert config.max_neo4j_evidence_bytes == 5242880

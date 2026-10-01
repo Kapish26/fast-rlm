@@ -509,16 +509,49 @@ export function recordsToGraphArtifact(
     }
     return jsonSafe(value);
   };
-  const rows = records.map((record) =>
+  const convertedRows = records.map((record) =>
     Object.fromEntries(
       record.keys.map((key) => [String(key), visit(record.get(key))]),
     )
   );
+  const isScalar = (value: unknown) =>
+    value === null || ["string", "number", "boolean"].includes(typeof value);
+  const containsGraphReference = (value: unknown): boolean => {
+    if (Array.isArray(value)) return value.some(containsGraphReference);
+    if (!isObject(value)) return false;
+    if (
+      (typeof value.node === "string" && Object.keys(value).length === 1) ||
+      (typeof value.relationship === "string" &&
+        Object.keys(value).length === 1) ||
+      (Array.isArray(value.path) && Array.isArray(value.relationships))
+    ) {
+      return true;
+    }
+    return Object.values(value).some(containsGraphReference);
+  };
+  const rows: Record<string, unknown>[] = [];
+  let omittedScalarRecords = 0;
+  for (const row of convertedRows) {
+    const values = Object.values(row);
+    if (
+      containsGraphReference(row) ||
+      (values.length === 1 && isScalar(values[0]))
+    ) {
+      rows.push(row);
+    } else {
+      omittedScalarRecords++;
+    }
+  }
   return {
     version: 1,
     backend: "networkx",
     graph_type: "MultiDiGraph",
-    attributes: { source_backend: "neo4j", records: rows, truncated },
+    attributes: {
+      source_backend: "neo4j",
+      records: rows,
+      omitted_scalar_records: omittedScalarRecords,
+      truncated,
+    },
     nodes: [...nodes.values()],
     edges: [...edges.values()],
   };

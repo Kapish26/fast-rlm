@@ -143,7 +143,7 @@ const MAX_CYPHER_QUERIES = positiveInteger(_config.max_cypher_queries, 5, "max_c
 const MAX_CYPHER_ROWS = positiveInteger(_config.max_cypher_rows, 100, "max_cypher_rows");
 const CYPHER_TIMEOUT_MS = positiveInteger(_config.cypher_timeout_ms, 15000, "cypher_timeout_ms");
 const MAX_NEO4J_OBSERVATION_BYTES = positiveInteger(
-    _config.max_neo4j_observation_bytes, 8192, "max_neo4j_observation_bytes",
+    _config.max_neo4j_observation_bytes, 4096, "max_neo4j_observation_bytes",
 );
 const MAX_NEO4J_TRANSCRIPT_BYTES = positiveInteger(
     _config.max_neo4j_transcript_bytes, 10240, "max_neo4j_transcript_bytes",
@@ -155,6 +155,7 @@ const MAX_NEO4J_EVIDENCE_BYTES = positiveInteger(
     _config.max_neo4j_evidence_bytes, 5242880, "max_neo4j_evidence_bytes",
 );
 let graphQueryCount = 0;
+let graphQueryFailureCategory: "child_did_not_finalize" | null = null;
 const API_MAX_RETRIES = _config.api_max_retries ?? 3;
 const API_TIMEOUT_MS = _config.api_timeout_ms ?? 600000;
 const ENABLE_TOOLS = _config.enable_tools ?? true;
@@ -426,7 +427,7 @@ await micropip.install("toon-format==0.9.0b1")
                     truncated: result.truncated,
                     graph: summary,
                 });
-                return { artifact: result.artifact, budget };
+                return { artifact: result.artifact, rows: result.rows, budget };
             } catch (queryError) {
                 logger.logEvent("neo4j_query_result", {
                     ...eventBase,
@@ -632,6 +633,7 @@ await micropip.install("toon-format==0.9.0b1")
             context: unknown,
             child_instruction?: unknown,
         ) => {
+            graphQueryFailureCategory = null;
             if (subagent_depth >= MAX_DEPTH) {
                 throw new Error(
                     "MAXIMUM DEPTH REACHED. Neo4j retrieval requires a graph child."
@@ -660,25 +662,36 @@ await micropip.install("toon-format==0.9.0b1")
                 graph: neo4jSourceSummary(neo4j!.source),
             });
             if (getVerbosity() >= 2) console.log("↳ graph_query called");
-            const artifact = await subagent(
-                plain,
-                subagent_depth + 1,
-                logger.run_id,
-                null,
-                null,
-                envVars ?? null,
-                null,
-                [],
-                llmKwargs ?? null,
-                undefined,
-                childInstruction,
-                undefined,
-                null,
-                true,
-                childGraphQueryId,
-                evaluationQEntity,
-                neo4j,
-            );
+            let artifact: GraphArtifact;
+            try {
+                artifact = await subagent(
+                    plain,
+                    subagent_depth + 1,
+                    logger.run_id,
+                    null,
+                    null,
+                    envVars ?? null,
+                    null,
+                    [],
+                    llmKwargs ?? null,
+                    undefined,
+                    childInstruction,
+                    undefined,
+                    null,
+                    true,
+                    childGraphQueryId,
+                    evaluationQEntity,
+                    neo4j,
+                );
+            } catch (error) {
+                if (
+                    error instanceof Error &&
+                    error.message === "Did not finish the function stack before subagent died"
+                ) {
+                    graphQueryFailureCategory = "child_did_not_finalize";
+                }
+                throw error;
+            }
             return { artifact, graph_query_id: childGraphQueryId };
         };
         pyodide.globals.set("__js_graph_query__", js_graph_query);
@@ -790,7 +803,7 @@ os.environ.update(_json.loads(${JSON.stringify(JSON.stringify(envVars))}))
         ? `import json as __graph_json\n__graph_artifact = __graph_json.loads(__graph_artifact_json__)\ngraph = __artifact_to_graph__(__graph_artifact)\nentity_index = __graph_artifact.get("entity_index")\nmax_graph_hops = ${MAX_GRAPH_HOPS}\nmin_entity_confidence = ${MIN_ENTITY_CONFIDENCE}\n`
         : "";
     const neo4jInputSetup = neo4jMode
-        ? `max_graph_hops = ${MAX_GRAPH_HOPS}\nmin_entity_confidence = ${MIN_ENTITY_CONFIDENCE}\nmax_cypher_queries = ${MAX_CYPHER_QUERIES}\nmax_cypher_rows = ${MAX_CYPHER_ROWS}\n__neo4j_observation_bytes__ = ${MAX_NEO4J_OBSERVATION_BYTES}\n`
+        ? `max_graph_hops = ${MAX_GRAPH_HOPS}\nmin_entity_confidence = ${MIN_ENTITY_CONFIDENCE}\nmax_cypher_queries = ${MAX_CYPHER_QUERIES}\nmax_cypher_rows = ${MAX_CYPHER_ROWS}\n__neo4j_observation_bytes__ = ${MAX_NEO4J_OBSERVATION_BYTES}\n__neo4j_print_role__ = ${JSON.stringify(graphAgent ? "child" : "root")}\n`
         : "";
     const finalSetup = graphFinalSetup(graphAgent, MAX_GRAPH_HOPS, neo4jMode);
     const graphQuerySetup = effectiveGraph
@@ -1366,6 +1379,16 @@ Output:\n${stdoutBuffer.trim()}
         stdoutBuffer = "";
         if (neo4jMode && graphAgent) {
             cypherAttemptGate.resetStep();
+            await pyodide.runPythonAsync(
+                "__graph_final_result__ = None\n" +
+                    "__graph_final_result_set__ = False\n" +
+                    "__graph_final_error__ = None",
+            );
+        } else if (graphAgent) {
+            await pyodide.runPythonAsync(
+                "__graph_final_result__ = None\n" +
+                    "__graph_final_result_set__ = False",
+            );
         }
 
         const execStart = now();
@@ -1375,7 +1398,36 @@ Output:\n${stdoutBuffer.trim()}
         } catch (error) {
             execThrew = true;
             if (neo4jMode) {
-                appendStdout("Error: Neo4j graph REPL execution failed");
+                const finalCategory = graphAgent
+                    ? pyodide.globals.get("__graph_final_error__")
+                    : null;
+                const allowedFinalCategories = new Set([
+                    "wrong_type", "size_limit", "records", "facts",
+                    "unknown_node", "unknown_edge", "duplicate_edge",
+                    "serialization",
+                ]);
+                if (
+                    typeof finalCategory === "string" &&
+                    allowedFinalCategories.has(finalCategory)
+                ) {
+                    const hint = finalCategory === "unknown_edge"
+                        ? " Preserve MultiDiGraph edge keys: iterate with " +
+                            "edges(keys=True, data=True) or select (u, v, key) " +
+                            "tuples with evidence_graph.edge_subgraph(...).copy()."
+                        : "";
+                    appendStdout(
+                        `Error: final_graph_rejected: ${finalCategory}.${hint}`,
+                    );
+                } else if (
+                    !graphAgent &&
+                    graphQueryFailureCategory === "child_did_not_finalize"
+                ) {
+                    appendStdout(
+                        "Error: graph_query_failed: child_did_not_finalize",
+                    );
+                } else {
+                    appendStdout("Error: Neo4j graph REPL execution failed");
+                }
             } else if (error instanceof Error) {
                 stdoutBuffer += `\nError: ${error.message} `;
             } else {
@@ -1493,7 +1545,7 @@ Output:\n${stdoutBuffer.trim()}
             execution_end: execEnd,
         };
 
-        if (graphAgent) {
+        if (graphAgent && !execThrew) {
             const graphFinalResultSet = pyodide.globals.get("__graph_final_result_set__");
             if (graphFinalResultSet) {
                 const rawArtifact = pyodide.globals.get("__graph_final_result__");

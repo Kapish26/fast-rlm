@@ -281,6 +281,20 @@ Deno.test("Neo4j conversion enriches placeholders and normalizes nested temporal
   assertEquals((rows[1].nested as Record<string, unknown>).nullable, null);
 });
 
+Deno.test("Neo4j conversion suppresses multi-column scalar-only rows", () => {
+  const artifact = recordsToGraphArtifact([
+    new FakeRecord({ source_name: "Jamaica", predicate: "language", target_name: "English" }),
+    new FakeRecord({ count: 3 }),
+    new FakeRecord({ node: node("node-1", "Jamaica"), score: 1.23456 }),
+  ]);
+  assertEquals(artifact.attributes.records, [
+    { count: 3 },
+    { node: { node: "node-1" }, score: 1.23456 },
+  ]);
+  assertEquals(artifact.attributes.omitted_scalar_records, 1);
+  assertEquals(artifact.nodes.length, 1);
+});
+
 Deno.test("Neo4j reads use configured database, timeout, row cap, and close session", async () => {
   let sessionClosed = false;
   let sessionConfig: Record<string, unknown> | null = null;

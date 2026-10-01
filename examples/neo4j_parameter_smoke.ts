@@ -50,13 +50,13 @@ const source = assertNeo4jSource({
 const literalLimitQuery = `
 CALL db.index.fulltext.queryNodes("webqsp_entity_names", $mention) YIELD node, score
 WHERE node.key IS NOT NULL
-RETURN node.key AS key, node.name AS name, score
+RETURN node, score
 ORDER BY score DESC LIMIT 10
 `;
 const parameterizedLimitQuery = `
 CALL db.index.fulltext.queryNodes("webqsp_entity_names", $mention) YIELD node, score
 WHERE node.key IS NOT NULL
-RETURN node.key AS key, node.name AS name, score
+RETURN node, score
 ORDER BY score DESC LIMIT $limit
 `;
 

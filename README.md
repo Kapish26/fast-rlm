@@ -267,7 +267,7 @@ result = fast_rlm.run(
 )
 ```
 
-The root delegates with `graph_query(context)`. Its graph child receives exactly one database operation, `await execute_read_only_cypher(query, parameters, limit)`, which executes bounded read-only Cypher and returns a real NetworkX `MultiDiGraph`. Neo4j nodes, relationships, and paths become NetworkX nodes and edges; scalar projections are retained in `graph.graph["records"]`. A child may make up to `max_cypher_queries` calls, then returns at most 20 selected edges with `GRAPH_FINAL`. Use a server-side read-only Neo4j account as defense in depth. See [`examples/webqsp_neo4j_graph_native.ipynb`](examples/webqsp_neo4j_graph_native.ipynb).
+The root delegates with `graph_query(context)`. Its graph child receives exactly one database operation, `await execute_read_only_cypher(query, parameters, limit)`, which executes bounded read-only Cypher and returns a real NetworkX `MultiDiGraph`. Neo4j nodes, relationships, and paths become NetworkX nodes and edges. A child may make up to `max_cypher_queries` calls, then returns at most 20 selected edges with `GRAPH_FINAL`. Each successful Neo4j `graph_query()` automatically emits one bounded TOON or JSON projection of the returned graph, so the root sees named evidence without manually printing nodes, edges, attributes, or opaque identifiers. Use a server-side read-only Neo4j account as defense in depth. See [`examples/webqsp_neo4j_graph_native.ipynb`](examples/webqsp_neo4j_graph_native.ipynb).
 
 Neo4j runs additionally log `neo4j_query_start`, `neo4j_query_result`, and `neo4j_query_rejected`. These events include counts, parameter names, timing, truncation, and graph sizes, but exclude parameter values and credentials.
 

@@ -436,7 +436,7 @@ function neo4jRootSystemPrompt(maxGraphHops: number): string {
     return `You are the root agent for a Neo4j-backed graph question. Return exactly one fenced \`\`\`repl code block per turn and never predict its output.
 The full database is not present in this REPL. In the first turn, delegate immediately with the already-defined \`context\`:
 \`subgraph = await graph_query(context, instruction="Retrieve only the bounded Neo4j evidence needed to answer the question and finish with GRAPH_FINAL.")\`.
-After delegation, inspect only the returned NetworkX \`subgraph\`. It is an \`nx.MultiDiGraph\`; endpoints are opaque node IDs, so never compare \`u\` or \`v\` with a name. Read names and stable keys through node properties. \`print(subgraph)\` emits a bounded display projection when inspection is useful. Join facts only when supported by returned evidence and never infer unsupported facts.
+The call automatically prints one bounded projection of the returned NetworkX \`subgraph\`. Inspect only that \`nx.MultiDiGraph\`; endpoints are opaque node IDs, so never compare \`u\` or \`v\` with a name. Read names and stable keys through node properties. Do not print nodes, edges, attributes, or evidence item by item; use \`print(subgraph)\` only if another bounded projection is needed. Join facts only when supported by returned evidence and never infer unsupported facts.
 Call \`FINAL(value)\` with one value matching the required schema. If the schema is an object, pass a Python dict, never keyword arguments or a JSON string. If the evidence is empty or insufficient and the schema has these fields, use \`FINAL({"answer_entities": [], "status": "insufficient_data", "message": "Cannot answer: insufficient data in the returned Neo4j evidence."})\`. Keep REPL output compact.`;
 }
 
@@ -448,16 +448,29 @@ function neo4jChildSystemPrompt(
     schema: string,
 ): string {
     return `You are a Neo4j graph-processing child. Return exactly one fenced \`\`\`repl code block per turn and never predict its output.
-You have NetworkX as \`nx\`, a persistent \`nx.MultiDiGraph\` named \`evidence_graph\`, and exactly one database operation: \`await execute_read_only_cypher(query, parameters=None, limit=None)\`. Each successful call returns a query-local \`nx.MultiDiGraph\` and merges it into \`evidence_graph\`. Node properties contain display names and globally unique stable \`key\` values; NetworkX endpoints remain opaque. \`print(graph)\` emits a bounded display projection when useful; query receipts report result/evidence counts and remaining attempts.
+You have NetworkX as \`nx\`, a persistent \`nx.MultiDiGraph\` named \`evidence_graph\`, and exactly one database operation: \`await execute_read_only_cypher(query, parameters=None, limit=None)\`. Each successful call returns a query-local \`nx.MultiDiGraph\` and merges it into \`evidence_graph\`. Assign that return value, for example \`result = await execute_read_only_cypher(...)\`; use \`print(result)\` for the query-local graph or \`print(evidence_graph)\` for accumulated evidence. No variable named \`graph\` is predefined. Node properties contain display names and globally unique stable \`key\` values; NetworkX endpoints remain opaque. Graph printing emits a bounded display projection; query receipts report result/evidence counts and remaining attempts.
 
-Only one validated Cypher database attempt is allowed in each generated REPL step. The local helpers \`build_fulltext_entity_query(entity_mention)\`, \`build_fulltext_entity_queries(entity_mention)\`, and \`find_neo4j_entity_seeds(candidate_graph, relation_graph, entity_mentions, relation_terms=(), max_seeds=3, min_confidence=0.75)\` are available directly in the REPL; use them when useful and do not import them from a module. You may make at most ${maxCypherQueries} database attempts total, each returning at most ${maxCypherRows} rows. Use parameters for all question-derived values and keep paths no deeper than ${maxGraphHops}.
+Only one validated Cypher database attempt is allowed in each generated REPL step. The local helpers \`build_fulltext_entity_query(entity_mention)\` and \`build_fulltext_entity_queries(entity_mention)\` return Lucene search strings for a full-text procedure parameter, not Cypher statements. \`find_neo4j_entity_seeds(candidate_graph, relation_graph, entity_mentions, relation_terms=(), max_seeds=3, min_confidence=0.75)\` is also available. Call these helpers directly when useful and do not import them from a module. You may make at most ${maxCypherQueries} database attempts total, each returning at most ${maxCypherRows} rows. Use parameters for all question-derived values and keep paths no deeper than ${maxGraphHops}.
 
 Database schema supplied by the caller:
 <neo4j_schema>
 ${schema}
 </neo4j_schema>
 
-Use the supplied schema to choose bounded retrieval. A full-text score is candidate-ranking evidence, not answer evidence. Retain only candidates with a non-empty globally unique \`key\`; follow-up relationship queries may scope only through previously observed \`$keys\`. Never carry Neo4j element IDs into later Cypher, substitute names for keys, or hardcode an unobserved key. Before finishing, select or copy at most 20 answer-supporting edges and 40 nodes from \`evidence_graph\` into a final graph and call \`GRAPH_FINAL(answer_graph)\`. Never return unsupported or fabricated evidence. Ordinary \`FINAL\` is forbidden. Do not attempt writes, any procedure except \`db.index.fulltext.queryNodes\`, schema changes, administration, unbounded paths, or a second Cypher statement in one call.`;
+Use the supplied schema to choose bounded retrieval. A full-text score is candidate-ranking evidence, not answer evidence. If you use full-text lookup, search the complete entity mention from the question before replacing it with an inferred canonical name. Retain only candidates with a non-empty globally unique \`key\`; follow-up relationship queries may scope only through previously observed \`$keys\`. Never carry Neo4j element IDs into later Cypher, substitute names for keys, or hardcode an unobserved key. Retrieve incident evidence in both incoming and outgoing directions when its direction is not yet established. Avoid broad predicate substring filters that can saturate the row limit with unrelated edges; once relevant predicates are observed, filter by their exact values. Answer-supporting relationship queries must return Neo4j nodes, relationships, or paths: use forms such as \`RETURN a, r, b\`. Scalar-only multi-column rows are omitted; single-scalar aggregates remain available. Names and predicates are nested under \`properties\`. Do not print nodes, edges, attributes, or evidence item by item; print the query-local graph or \`evidence_graph\` for bounded observation. Do not repeat a query merely to confirm facts already present in \`evidence_graph\`; when sufficient answer evidence exists, filter it with NetworkX and finalize.
+
+Use the nested attribute contract and preserve MultiDiGraph edge identity when selecting final evidence:
+\`\`\`python
+selected_edges = []
+for u, v, key, data in evidence_graph.edges(keys=True, data=True):
+    predicate = data.get("properties", {}).get("predicate")
+    source_name = evidence_graph.nodes[u].get("properties", {}).get("name")
+    if predicate in relevant_predicates and source_name in relevant_source_names:
+        selected_edges.append((u, v, key))
+answer_graph = evidence_graph.edge_subgraph(selected_edges).copy()
+GRAPH_FINAL(answer_graph)
+\`\`\`
+Before finishing, select at most 20 answer-supporting edges and 40 nodes. Never return unsupported or fabricated evidence. Ordinary \`FINAL\` is forbidden. Do not attempt writes, any procedure except \`db.index.fulltext.queryNodes\`, schema changes, administration, unbounded paths, or a second Cypher statement in one call.`;
 }
 
 // Remove text from startMarker (inclusive) up to endMarker (exclusive).

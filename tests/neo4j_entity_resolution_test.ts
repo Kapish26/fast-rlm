@@ -117,22 +117,24 @@ snapshot_graph.graph["records"] = [
     {"entity": {"node": "n1"}, "count": 1, "raw": {"secret": "no"}},
     {"edge": {"relationship": "rel-1"}},
 ]
+snapshot_graph.graph["omitted_scalar_records"] = 2
+__neo4j_print_role__ = "child"
 json.dumps(neo4j_graph_snapshot(
     snapshot_graph, node_limit=1, edge_limit=1, record_limit=1
 ))
 `);
   const parsed = JSON.parse(String(result));
-  assertEquals(parsed.total_nodes, 2);
-  assertEquals(parsed.shown_nodes, 1);
-  assertEquals(parsed.nodes_truncated, true);
-  assertEquals(parsed.nodes[0].name, "Jamaica");
-  assertEquals(parsed.nodes[0].properties, undefined);
-  assertEquals(parsed.edges[0].predicate, "language spoken");
-  assertEquals(parsed.edges[0].relationship_id, undefined);
-  assertEquals(parsed.records[0].entity_name, "Jamaica");
-  assertEquals(parsed.records[0].count, 1);
-  assertEquals(parsed.records[0].raw, undefined);
-  assertEquals(parsed.records_truncated, false);
+  assertEquals(parsed.counts, { nodes: 2, edges: 1, records: 4 });
+  assertEquals(parsed.facts, [{
+    source_name: "Jamaica",
+    predicate: "language spoken",
+    target_name: "Jamaican English",
+  }]);
+  assertEquals(parsed.keys, [{ name: "Jamaica", key: "k1" }]);
+  assertEquals(parsed.omitted_scalar_records, 2);
+  assertEquals(parsed.hint.includes("Return Neo4j graph values"), true);
+  assertEquals(JSON.stringify(parsed).includes("secret"), false);
+  assertEquals(JSON.stringify(parsed).includes("rel-1"), false);
 });
 
 Deno.test("Neo4j entity helper rejects empty mentions", async () => {
@@ -154,62 +156,261 @@ _graph = nx.MultiDiGraph()
 _graph.add_node("internal-a", properties={"name": "Jamaica", "key": "jamaica-key", "secret": "no"})
 _graph.add_node("internal-b", properties={"name": "Jamaican English", "key": "english-key"})
 _graph.add_edge("internal-a", "internal-b", key="rel-internal", properties={"predicate": "language"}, relation="RELATED")
-__neo4j_observation_bytes__ = 80
+__neo4j_observation_bytes__ = 220
 _projection = __neo4j_graph_for_print__(_graph)
 _output = json.dumps(_projection)
-json.dumps({"output": _output, "truncated": _projection.get("projection_bytes_truncated", False)})
+json.dumps({
+    "output": _output,
+    "truncated": bool(_projection.get("truncated")),
+    "bytes": len(__neo4j_encoded_bytes__(_projection)),
+})
 `);
   const parsed = JSON.parse(String(result));
   assertEquals(parsed.output.includes("internal-a"), false);
   assertEquals(parsed.output.includes("secret"), false);
-  assertEquals(parsed.truncated, true);
+  assert(parsed.bytes <= 220);
 });
 
-Deno.test("Neo4j GRAPH_FINAL canonicalizes evidence and rejects fabricated edges", async () => {
+Deno.test("documented Neo4j selection preserves nested Jamaica multiedges", async () => {
+  await pyodide.runPythonAsync(graphFinalSetup(true, 4, true));
+  const result = await pyodide.runPythonAsync(`
+import json
+evidence_graph.clear()
+evidence_graph.graph.update({"source_backend": "neo4j", "records": [], "truncated": False})
+evidence_graph.add_node(
+    "jamaica", neo4j_element_id="jamaica",
+    properties={"key": "Jamaica", "name": "Jamaica"},
+)
+evidence_graph.add_node(
+    "english", neo4j_element_id="english",
+    properties={"key": "Jamaican English", "name": "Jamaican English"},
+)
+evidence_graph.add_node(
+    "creole", neo4j_element_id="creole",
+    properties={
+        "key": "Jamaican Creole English Language",
+        "name": "Jamaican Creole English Language",
+    },
+)
+evidence_graph.add_edge(
+    "jamaica", "english", key="rel-official",
+    neo4j_element_id="rel-official", relation="RELATED", type="RELATED",
+    properties={"predicate": "location.country.official_language"},
+)
+evidence_graph.add_edge(
+    "jamaica", "english", key="rel-spoken",
+    neo4j_element_id="rel-spoken", relation="RELATED", type="RELATED",
+    properties={"predicate": "location.country.languages_spoken"},
+)
+evidence_graph.add_edge(
+    "jamaica", "creole", key="rel-creole",
+    neo4j_element_id="rel-creole", relation="RELATED", type="RELATED",
+    properties={"predicate": "location.country.languages_spoken"},
+)
+
+relevant_predicates = {
+    "location.country.official_language",
+    "location.country.languages_spoken",
+}
+relevant_source_names = {"Jamaica"}
+selected_edges = []
+for u, v, key, data in evidence_graph.edges(keys=True, data=True):
+    predicate = data.get("properties", {}).get("predicate")
+    source_name = evidence_graph.nodes[u].get("properties", {}).get("name")
+    if predicate in relevant_predicates and source_name in relevant_source_names:
+        selected_edges.append((u, v, key))
+answer_graph = evidence_graph.edge_subgraph(selected_edges).copy()
+GRAPH_FINAL(answer_graph)
+
+json.dumps({
+    "selected": len(selected_edges),
+    "nodes": sorted(
+        node["attributes"]["properties"]["name"]
+        for node in __graph_final_result__["nodes"]
+    ),
+    "keys": sorted(edge["key"] for edge in __graph_final_result__["edges"]),
+    "predicates": sorted(
+        edge["attributes"]["properties"]["predicate"]
+        for edge in __graph_final_result__["edges"]
+    ),
+    "has_top_level_predicate": any(
+        "predicate" in edge["attributes"]
+        for edge in __graph_final_result__["edges"]
+    ),
+})
+`);
+  const parsed = JSON.parse(String(result));
+  assertEquals(parsed.selected, 3);
+  assertEquals(parsed.nodes, [
+    "Jamaica",
+    "Jamaican Creole English Language",
+    "Jamaican English",
+  ]);
+  assertEquals(parsed.keys, ["rel-creole", "rel-official", "rel-spoken"]);
+  assertEquals(parsed.predicates, [
+    "location.country.languages_spoken",
+    "location.country.languages_spoken",
+    "location.country.official_language",
+  ]);
+  assertEquals(parsed.has_top_level_predicate, false);
+});
+
+Deno.test("Neo4j GRAPH_FINAL recovers authentic lost multiedge keys", async () => {
   await pyodide.runPythonAsync(graphFinalSetup(true, 4, true));
   const result = await pyodide.runPythonAsync(`
 import json
 evidence_graph.clear()
 evidence_graph.graph.update({"source_backend": "neo4j", "records": [{"count": 3}], "truncated": False})
-evidence_graph.add_node("seed", properties={"key": "seed-key", "name": "Seed"})
-evidence_graph.add_node("answer", properties={"key": "answer-key", "name": "Answer"})
-evidence_graph.add_edge("seed", "answer", key="rel-1", properties={"predicate": "answers"}, relation="RELATED")
+evidence_graph.add_node("jamaica", properties={"key": "jamaica-key", "name": "Jamaica"})
+evidence_graph.add_node("english", properties={"key": "english-key", "name": "Jamaican English"})
+evidence_graph.add_node("creole", properties={"key": "creole-key", "name": "Jamaican Creole English Language"})
+evidence_graph.add_edge(
+    "jamaica", "english", key="rel-official",
+    neo4j_element_id="rel-official", relation="RELATED",
+    properties={"predicate": "location.country.official_language"},
+)
+evidence_graph.add_edge(
+    "jamaica", "english", key="rel-spoken",
+    neo4j_element_id="rel-spoken", relation="RELATED",
+    properties={"predicate": "location.country.languages_spoken"},
+)
+evidence_graph.add_edge(
+    "jamaica", "creole", key="rel-creole",
+    neo4j_element_id="rel-creole", relation="RELATED",
+    properties={"predicate": "location.country.languages_spoken"},
+)
+
+# This is the failed live-run shape: copying without keys assigns local 0/1 keys.
 _answer = nx.MultiDiGraph()
-_answer.add_node("seed", forged=True)
-_answer.add_node("answer")
-_answer.add_edge("seed", "answer", key="rel-1", forged=True)
+for _source, _target, _data in evidence_graph.edges(data=True):
+    _answer.add_edge(_source, _target, forged=True, **dict(_data))
+_answer.nodes["jamaica"]["forged"] = True
 _answer.graph["facts"] = [{"name": "count", "value": 3}]
 GRAPH_FINAL(_answer)
 _artifact = __graph_final_result__
-_forged = None
-try:
-    _bad = nx.MultiDiGraph()
-    _bad.add_node("seed")
-    _bad.add_node("answer")
-    _bad.add_edge("seed", "answer", key="fake")
-    GRAPH_FINAL(_bad)
-except ValueError as _error:
-    _forged = str(_error)
-_bad_fact = None
-try:
-    _wrong_fact = nx.MultiDiGraph()
-    _wrong_fact.graph["facts"] = [{"name": "count", "value": 4}]
-    GRAPH_FINAL(_wrong_fact)
-except ValueError as _error:
-    _bad_fact = str(_error)
 json.dumps({
-    "attrs": _artifact["edges"][0]["attributes"],
+    "keys": sorted(_edge["key"] for _edge in _artifact["edges"]),
+    "edge_attrs": [_edge["attributes"] for _edge in _artifact["edges"]],
+    "node_attrs": [_node["attributes"] for _node in _artifact["nodes"]],
     "facts": _artifact["attributes"]["facts"],
-    "forged": _forged,
-    "bad_fact": _bad_fact,
 })
 `);
   const parsed = JSON.parse(String(result));
-  assertEquals(parsed.attrs.forged, undefined);
-  assertEquals(parsed.attrs.relation, "RELATED");
+  assertEquals(parsed.keys, ["rel-creole", "rel-official", "rel-spoken"]);
+  assertEquals(
+    parsed.edge_attrs.every((attrs: Record<string, unknown>) => attrs.forged === undefined),
+    true,
+  );
+  assertEquals(
+    parsed.node_attrs.every((attrs: Record<string, unknown>) => attrs.forged === undefined),
+    true,
+  );
   assertEquals(parsed.facts, [{ name: "count", value: 3 }]);
-  assertEquals(parsed.forged, "final_graph_rejected: unknown_edge");
-  assertEquals(parsed.bad_fact, "final_graph_rejected: facts");
+});
+
+Deno.test("Neo4j GRAPH_FINAL rejects unsupported and duplicate edge provenance", async () => {
+  const result = await pyodide.runPythonAsync(`
+import json
+
+def _rejection(graph):
+    try:
+        GRAPH_FINAL(graph)
+    except ValueError as error:
+        return str(error)
+    return None
+
+_exact = evidence_graph.edge_subgraph([
+    ("jamaica", "english", "rel-official"),
+]).copy()
+_exact.edges["jamaica", "english", "rel-official"]["forged"] = True
+GRAPH_FINAL(_exact)
+_exact_artifact = __graph_final_result__
+
+_missing_id = nx.MultiDiGraph()
+_missing_id.add_edge(
+    "jamaica", "english", key=0, relation="RELATED",
+    properties={"predicate": "location.country.official_language"},
+)
+
+_fabricated_id = nx.MultiDiGraph()
+_fabricated_id.add_edge(
+    "jamaica", "english", key=0, neo4j_element_id="fabricated",
+)
+
+_wrong_endpoints = nx.MultiDiGraph()
+_wrong_endpoints.add_edge(
+    "jamaica", "creole", key=0, neo4j_element_id="rel-official",
+)
+
+_duplicate = nx.MultiDiGraph()
+_duplicate.add_edge(
+    "jamaica", "english", key="rel-official",
+    neo4j_element_id="rel-official",
+)
+_duplicate.add_edge(
+    "jamaica", "english", key=0,
+    neo4j_element_id="rel-official",
+)
+
+_results = {
+    "exact_key": _exact_artifact["edges"][0]["key"],
+    "exact_attrs": _exact_artifact["edges"][0]["attributes"],
+    "missing_id": _rejection(_missing_id),
+    "fabricated_id": _rejection(_fabricated_id),
+    "wrong_endpoints": _rejection(_wrong_endpoints),
+    "duplicate": _rejection(_duplicate),
+    "category_after_duplicate": __graph_final_error__,
+    "result_set_after_duplicate": __graph_final_result_set__,
+}
+GRAPH_FINAL(_exact)
+_results["category_after_success"] = __graph_final_error__
+json.dumps(_results)
+`);
+  const parsed = JSON.parse(String(result));
+  assertEquals(parsed.exact_key, "rel-official");
+  assertEquals(parsed.exact_attrs.forged, undefined);
+  assertEquals(parsed.missing_id, "final_graph_rejected: unknown_edge");
+  assertEquals(parsed.fabricated_id, "final_graph_rejected: unknown_edge");
+  assertEquals(parsed.wrong_endpoints, "final_graph_rejected: unknown_edge");
+  assertEquals(parsed.duplicate, "final_graph_rejected: duplicate_edge");
+  assertEquals(parsed.category_after_duplicate, "duplicate_edge");
+  assertEquals(parsed.result_set_after_duplicate, false);
+  assertEquals(parsed.category_after_success, null);
+});
+
+Deno.test("Neo4j GRAPH_FINAL exposes only fixed rejection categories", async () => {
+  const result = await pyodide.runPythonAsync(`
+import json
+
+def _category(graph):
+    try:
+        GRAPH_FINAL(graph)
+    except ValueError:
+        return __graph_final_error__
+    return None
+
+_unknown_node = nx.MultiDiGraph()
+_unknown_node.add_node("database-secret")
+
+_bad_fact = nx.MultiDiGraph()
+_bad_fact.graph["facts"] = [{"name": "count", "value": 4}]
+
+_records = nx.MultiDiGraph()
+_records.graph["records"] = [{"secret": "database text"}]
+
+json.dumps({
+    "wrong_type": _category(nx.DiGraph()),
+    "unknown_node": _category(_unknown_node),
+    "facts": _category(_bad_fact),
+    "records": _category(_records),
+})
+`);
+  assertEquals(JSON.parse(String(result)), {
+    wrong_type: "wrong_type",
+    unknown_node: "unknown_node",
+    facts: "facts",
+    records: "records",
+  });
 });
 
 Deno.test("full-text reads automatically record considered seed names", async () => {

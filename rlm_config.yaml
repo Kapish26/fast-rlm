@@ -11,7 +11,7 @@ api_timeout_ms: 30000
 max_cypher_queries: 5
 max_cypher_rows: 100
 cypher_timeout_ms: 15000
-max_neo4j_observation_bytes: 8192
+max_neo4j_observation_bytes: 4096
 max_neo4j_transcript_bytes: 10240
 max_neo4j_query_artifact_bytes: 1048576
 max_neo4j_evidence_bytes: 5242880

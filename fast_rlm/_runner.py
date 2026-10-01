@@ -196,7 +196,7 @@ class RLMConfig:
     max_cypher_queries: int = 5
     max_cypher_rows: int = 100
     cypher_timeout_ms: int = 15000
-    max_neo4j_observation_bytes: int = 8192
+    max_neo4j_observation_bytes: int = 4096
     max_neo4j_transcript_bytes: int = 10240
     max_neo4j_query_artifact_bytes: int = 1048576
     max_neo4j_evidence_bytes: int = 5242880
@@ -675,7 +675,7 @@ def run(
         ("max_cypher_queries", 5),
         ("max_cypher_rows", 100),
         ("cypher_timeout_ms", 15000),
-        ("max_neo4j_observation_bytes", 8192),
+        ("max_neo4j_observation_bytes", 4096),
         ("max_neo4j_transcript_bytes", 10240),
         ("max_neo4j_query_artifact_bytes", 1048576),
         ("max_neo4j_evidence_bytes", 5242880),
